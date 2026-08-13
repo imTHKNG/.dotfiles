@@ -153,34 +153,13 @@ The plugin list is tracked in:
 ~/.config/fish/fish_plugins
 ```
 
-Currently configured plugins:
-
-- `jorgebucaran/fisher`
-- `patrickf1/fzf.fish`
-- `jorgebucaran/autopair.fish`
-- `lewisacidic/fish-git-abbr`
-- `gazorby/fish-abbreviation-tips`
-
-Install Fisher:
+Install Fisher and synchronize the plugins declared in `fish_plugins`:
 
 ```bash
 fish ~/.config/fish/install_fisher.sh
 ```
 
-Install configured Fish plugins:
-
-```bash
-fish ~/.config/fish/install_fisher_plugins.sh
-```
-
-If working directly from the repo before `chezmoi apply`, use:
-
-```bash
-fish home/dot_config/fish/install_fisher.sh
-fish home/dot_config/fish/install_fisher_plugins.sh
-```
-
-After Fisher is installed, plugin maintenance can also be done with:
+Run this after `chezmoi apply`, so the tracked `fish_plugins` file is already in place. Rerun the same script after changing `fish_plugins` to install, update, or remove plugins as needed. Internally it uses:
 
 ```fish
 fisher update
