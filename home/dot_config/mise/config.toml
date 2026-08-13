@@ -39,6 +39,7 @@ superfile = "1.6.0"
 "github:agavra/tuicr" = "0.21.0"
 "aqua:pimalaya/himalaya" = "2.0.0"
 workmux = "0.1.237"
+"cargo:rustic-rs" = "0.11.3"
 
 [settings]
 minimum_release_age = "7d"
