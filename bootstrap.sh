@@ -4,6 +4,8 @@ set -euo pipefail
 DOTFILES_REPO="${DOTFILES_REPO:-git@github.com:KNTH01/.dotfiles.git}"
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 
+export PATH="$HOME/.local/bin:$PATH"
+
 CHEZMOI_CONFIG_DIR="$HOME/.config/chezmoi"
 CHEZMOI_CONFIG="$CHEZMOI_CONFIG_DIR/chezmoi.toml"
 CHEZMOI_AGE_IDENTITY="$HOME/.config/age/key.txt"
@@ -20,25 +22,35 @@ need_cmd() {
 }
 
 install_deps_arch() {
-  sudo pacman -S --needed git chezmoi
+  sudo pacman -S --needed git chezmoi curl fish
 }
 
 install_deps_debian() {
   sudo apt update
-  sudo apt install -y git chezmoi
+  sudo apt install -y git chezmoi curl fish
 }
 
 echo "==> Checking dependencies"
 
-if ! need_cmd git || ! need_cmd chezmoi; then
+if ! need_cmd git || ! need_cmd chezmoi || ! need_cmd curl || ! need_cmd fish; then
   if need_cmd pacman; then
     install_deps_arch
   elif need_cmd apt; then
     install_deps_debian
   else
-    echo "Unsupported distro. Install git and chezmoi manually, then rerun."
+    echo "Unsupported distro. Install git, chezmoi, curl, and Fish manually, then rerun."
     exit 1
   fi
+fi
+
+if ! need_cmd mise; then
+  echo "==> mise is required but is not installed"
+  echo "Review the official installation instructions, then run this command yourself:"
+  echo
+  echo "  curl --fail --silent --show-error --location https://mise.run | sh"
+  echo
+  echo "Rerun bootstrap.sh after mise is installed."
+  exit 1
 fi
 
 echo "==> Cloning/updating dotfiles"
@@ -85,14 +97,17 @@ echo "==> Previewing diff"
 chezmoi diff
 
 echo
-read -r -p "Apply dotfiles now? [y/N] " answer
+read -r -p "Apply dotfiles and run machine setup now? [y/N] " answer
 
 case "$answer" in
   y|Y|yes|YES)
     chezmoi apply
+    echo
+    "$HOME/.local/bin/dotfiles-setup"
     ;;
   *)
-    echo "Skipped apply. Run manually with:"
+    echo "Skipped apply and machine setup. Run manually with:"
     echo "  chezmoi apply"
+    echo "  ~/.local/bin/dotfiles-setup"
     ;;
 esac

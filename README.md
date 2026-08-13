@@ -9,19 +9,20 @@ git clone git@github.com:KNTH01/.dotfiles.git ~/.dotfiles
 ~/.dotfiles/bootstrap.sh
 ```
 
-The bootstrap script installs `git` and `chezmoi` on Arch/Debian-like systems when missing, writes:
+The bootstrap script installs `git`, `chezmoi`, `curl`, and Fish on Arch/Debian-like systems when missing. If mise is missing, it prints the official installation command for you to review and run manually, then exits so you can rerun the bootstrap afterward. It writes:
 
 ```text
 ~/.config/chezmoi/chezmoi.toml
 ```
 
-with `sourceDir = "$HOME/.dotfiles"`, previews `chezmoi diff`, then optionally runs `chezmoi apply`.
+with `sourceDir = "$HOME/.dotfiles"` and previews `chezmoi diff`. If confirmed, it applies the dotfiles and runs `dotfiles-setup`, which installs mise-managed tools, synchronizes Fisher plugins, and generates Fish completions.
 
-Or manually:
+After mise and chezmoi are installed, the equivalent manual flow is:
 
 ```bash
 chezmoi init --source="$HOME/.dotfiles"
 chezmoi apply
+~/.local/bin/dotfiles-setup
 ```
 
 ## Managed files
@@ -46,6 +47,7 @@ This repo currently manages, among others:
 - `~/.config/rofi/...`
 - `~/.config/paru/paru.conf`
 - `~/.local/bin/cheat`
+- `~/.local/bin/dotfiles-setup`
 - `~/.local/bin/fish-regenerate-completions`
 - `~/.local/bin/omarchy-webapp-install` / `web2app` helpers
 
