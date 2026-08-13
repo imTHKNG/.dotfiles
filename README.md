@@ -177,14 +177,10 @@ sudo apt install fzf
 
 ## Fish generated completions
 
-`deno.fish` and `mise.fish` are generated locally and are not tracked in Git.
-After `chezmoi apply` on a machine with `deno` and `mise` installed, run:
+Generated Fish completions are local artifacts and are not tracked in Git. Regenerate completions for each available supported tool with:
 
 ```bash
 ~/.local/bin/fish-regenerate-completions
 ```
 
-This writes:
-
-- `~/.config/fish/completions/deno.fish`
-- `~/.config/fish/completions/mise.fish`
+This writes completions for Deno, mise, Rustic, Bun, and Usage. Fisher installs its own completion while synchronizing plugins.

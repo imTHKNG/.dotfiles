@@ -3,19 +3,47 @@ set -euo pipefail
 
 config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
 completions_dir="$config_home/fish/completions"
+tmp_dir="$(mktemp -d)"
+trap 'rm -rf "$tmp_dir"' EXIT
 
 mkdir -p "$completions_dir"
 
+generate_completion() {
+  local name="$1"
+  shift
+
+  "$@" > "$tmp_dir/$name.fish"
+  mv "$tmp_dir/$name.fish" "$completions_dir/$name.fish"
+  echo "generated $completions_dir/$name.fish"
+}
+
 if command -v deno >/dev/null 2>&1; then
-  deno completions fish > "$completions_dir/deno.fish"
-  echo "generated $completions_dir/deno.fish"
+  generate_completion deno deno completions fish
 else
   echo "skipped deno: command not found" >&2
 fi
 
 if command -v mise >/dev/null 2>&1; then
-  mise completion fish > "$completions_dir/mise.fish"
-  echo "generated $completions_dir/mise.fish"
+  generate_completion mise mise completion fish
 else
   echo "skipped mise: command not found" >&2
+fi
+
+if command -v rustic >/dev/null 2>&1; then
+  generate_completion rustic rustic --log-level error completions fish
+else
+  echo "skipped rustic: command not found" >&2
+fi
+
+if command -v bun >/dev/null 2>&1; then
+  generate_completion bun env SHELL=fish bun completions
+else
+  echo "skipped bun: command not found" >&2
+fi
+
+if command -v usage >/dev/null 2>&1; then
+  generate_completion usage usage generate completion \
+    --usage-cmd "usage --usage-spec" fish usage
+else
+  echo "skipped usage: command not found" >&2
 fi
