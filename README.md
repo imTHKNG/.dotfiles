@@ -112,6 +112,8 @@ kde-theme light
 kde-theme dark
 ```
 
+From SSH, the command runs through the graphical session's systemd user manager.
+
 Tmux follows the KDE light/dark color scheme via:
 
 - `~/.local/bin/tmux-sync-theme`

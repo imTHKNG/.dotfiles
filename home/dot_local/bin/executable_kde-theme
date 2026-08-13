@@ -43,9 +43,20 @@ case "$theme" in
     ;;
 esac
 
-if ! command -v plasma-apply-lookandfeel >/dev/null 2>&1; then
+apply_command="$(command -v plasma-apply-lookandfeel || true)"
+if [[ -z "$apply_command" ]]; then
   printf 'error: plasma-apply-lookandfeel is not installed\n' >&2
   exit 1
 fi
 
-plasma-apply-lookandfeel -a "$package"
+if [[ -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" ]]; then
+  "$apply_command" -a "$package"
+elif command -v systemd-run >/dev/null 2>&1; then
+  # An SSH shell has no display, but Plasma's user manager has the graphical
+  # session environment imported. Run there and wait for the result.
+  systemd-run --user --wait --pipe --collect --quiet \
+    "$apply_command" -a "$package"
+else
+  printf 'error: no graphical session and systemd-run is unavailable\n' >&2
+  exit 1
+fi
