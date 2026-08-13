@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  printf 'usage: %s [light|dark]\n' "$0" >&2
+  printf '       no argument toggles the current theme\n' >&2
+}
+
+read_color_scheme() {
+  if command -v kreadconfig6 >/dev/null 2>&1; then
+    kreadconfig6 --file kdeglobals --group General --key ColorScheme 2>/dev/null || true
+  elif command -v kreadconfig5 >/dev/null 2>&1; then
+    kreadconfig5 --file kdeglobals --group General --key ColorScheme 2>/dev/null || true
+  fi
+}
+
+if (( $# > 1 )); then
+  usage
+  exit 2
+fi
+
+theme="${1:-toggle}"
+
+if [[ "$theme" == "toggle" ]]; then
+  current="$(read_color_scheme)"
+  if [[ "${current,,}" == *dark* ]]; then
+    theme="light"
+  else
+    theme="dark"
+  fi
+fi
+
+case "$theme" in
+  light)
+    package="org.kde.breeze.desktop"
+    ;;
+  dark)
+    package="org.kde.breezedark.desktop"
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac
+
+if ! command -v plasma-apply-lookandfeel >/dev/null 2>&1; then
+  printf 'error: plasma-apply-lookandfeel is not installed\n' >&2
+  exit 1
+fi
+
+plasma-apply-lookandfeel -a "$package"

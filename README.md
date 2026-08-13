@@ -104,6 +104,14 @@ prefix + alt-u  remove plugins no longer listed in ~/.tmux.conf
 
 ### KDE theme sync
 
+Switch the global KDE Breeze theme (no argument toggles it):
+
+```bash
+kde-theme        # toggle light/dark
+kde-theme light
+kde-theme dark
+```
+
 Tmux follows the KDE light/dark color scheme via:
 
 - `~/.local/bin/tmux-sync-theme`
