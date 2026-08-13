@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+fisher_setup="$config_home/fish/install_fisher.sh"
+completions_setup="$HOME/.local/bin/fish-regenerate-completions"
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "dotfiles-setup: required command not found: $1" >&2
+    return 1
+  fi
+}
+
+require_file() {
+  if [ ! -f "$1" ]; then
+    echo "dotfiles-setup: required managed file not found: $1" >&2
+    echo "Run 'chezmoi apply' before running dotfiles-setup." >&2
+    return 1
+  fi
+}
+
+require_command mise
+require_command fish
+require_file "$fisher_setup"
+require_file "$completions_setup"
+
+echo "==> Installing mise tools"
+mise install
+
+echo "==> Synchronizing Fish plugins"
+fish "$fisher_setup"
+
+echo "==> Generating Fish completions"
+mise exec -- "$completions_setup"
+
+echo "==> Dotfiles setup complete"
