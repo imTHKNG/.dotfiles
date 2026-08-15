@@ -30,20 +30,4 @@ return {
 		},
 	},
 
-	-- rust-tools options
-	tools = {
-		hover_actions = {
-			auto_focus = true,
-		},
-		inlay_hints = {
-			-- prefix for parameter hints
-			parameter_hints_prefix = " ",
-			-- prefix for all the other hints (type, chaining)
-			other_hints_prefix = " ",
-		},
-	},
-
-	dap = {
-		-- adapter = rt_codelldb_adapter
-	},
 }
