@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+if (( $# == 0 )); then
+  printf 'Usage: magix <prompt>\n' >&2
+  exit 2
+fi
+
+prompt="$*"
+system_prompt='Translate the user request into one shell command. Output only the command itself, with no Markdown, code fences, commentary, or explanation.'
+
+if ! generated_command="$(
+  pi \
+    --print \
+    --no-session \
+    --no-tools \
+    --no-extensions \
+    --no-skills \
+    --no-prompt-templates \
+    --no-context-files \
+    --system-prompt "$system_prompt" \
+    "$prompt"
+)"; then
+  printf 'magix: pi failed to generate a command\n' >&2
+  exit 1
+fi
+
+if [[ -z "${generated_command//[[:space:]]/}" ]]; then
+  printf 'magix: pi generated an empty command\n' >&2
+  exit 1
+fi
+
+printf 'Command:\n%s\n' "$generated_command"
+read -r -p 'Run this command? [y/N] ' confirmation
+
+case "$confirmation" in
+  y|Y|yes|YES|Yes)
+    bash -c "$generated_command"
+    ;;
+  *)
+    printf 'Cancelled.\n'
+    ;;
+esac
