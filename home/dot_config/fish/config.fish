@@ -13,17 +13,17 @@ alias oldcat="/usr/bin/cat"
 alias oldls="/usr/bin/ls"
 
 if type -q eza
-    alias ls="eza --color=always --group-directories-first --icons"
-    alias la="eza -a --color=always --group-directories-first --icons"
-    alias ll="eza -l --color=always --group-directories-first --icons"
-    alias lla="eza -la --color=always --group-directories-first --icons"
-    alias lt="eza -aT --color=always --group-directories-first --icons"
-    alias llg="eza -l --git --color=always --group-directories-first --icons"
-    alias llag="eza -la --git --color=always --group-directories-first --icons"
-    alias llt="eza -laT --color=always --group-directories-first --icons"
-    alias lt1="eza -aT --level=1 --color=always --group-directories-first --icons"
-    alias lt2="eza -aT --level=2 --color=always --group-directories-first --icons"
-    alias lt3="eza -aT --level=3 --color=always --group-directories-first --icons"
+    alias ls="eza --color=always --group-directories-first --icons=always"
+    alias la="eza -a --color=always --group-directories-first --icons=always"
+    alias ll="eza -l --color=always --group-directories-first --icons=always"
+    alias lla="eza -la --color=always --group-directories-first --icons=always"
+    alias lt="eza -aT --color=always --group-directories-first --icons=always"
+    alias llg="eza -l --git --color=always --group-directories-first --icons=always"
+    alias llag="eza -la --git --color=always --group-directories-first --icons=always"
+    alias llt="eza -laT --color=always --group-directories-first --icons=always"
+    alias lt1="eza -aT --level=1 --color=always --group-directories-first --icons=always"
+    alias lt2="eza -aT --level=2 --color=always --group-directories-first --icons=always"
+    alias lt3="eza -aT --level=3 --color=always --group-directories-first --icons=always"
 end
 
 if type -q xclip
