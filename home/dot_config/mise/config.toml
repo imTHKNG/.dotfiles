@@ -14,7 +14,7 @@ ripgrep = "15.2.0"
 tree-sitter = "0.27.0"
 "npm:@effect/language-service" = "0.87.2"
 rust = { version = "1.98.0", components = ["rust-analyzer"] }
-"npm:@steipete/summarize" = "0.18.1"
+"npm:@steipete/summarize" = "0.21.11"
 "cargo:lstr" = "0.2.1"
 uv = "0.12.7"
 "pipx:yt-dlp" = "2026.6.9"
