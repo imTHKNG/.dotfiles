@@ -16,7 +16,7 @@ tree-sitter = "0.26.9"
 rust = { version = "1.98.0", components = ["rust-analyzer"] }
 "npm:@steipete/summarize" = "0.18.1"
 "cargo:lstr" = "0.2.1"
-uv = "0.11.21"
+uv = "0.12.7"
 "pipx:yt-dlp" = "2026.6.9"
 glow = "2.1.2"
 "npm:@openai/codex" = "0.144.5"
