@@ -1,7 +1,7 @@
 [tools]
 usage = "3.5.0"
 bun = "1.4.0"
-node = "26.3.0"
+node = "26.8.1"
 "npm:agent-browser" = "0.27.3"
 btop = "1.4.7"
 bottom = "0.14.9"
