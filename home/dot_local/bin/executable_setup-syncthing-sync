@@ -1,0 +1,99 @@
+#!/usr/bin/env fish
+
+# Configure the shared ~/sync Syncthing folder on Kevin's devices.
+# Safe to run repeatedly. Use --dry-run to inspect, --apply to change state.
+
+set -l mode dry-run
+set -l folder_id sync
+set -l folder_label sync
+set -l folder_path "$HOME/sync"
+set -l expected_devices pixelpirate raven velvet
+
+function usage
+    printf '%s\n' \
+        'Usage: setup-syncthing-sync [--dry-run|--apply]' \
+        '' \
+        '  --dry-run  Inspect local Syncthing state without changing it (default).' \
+        '  --apply    Install/start Syncthing if needed and configure ~/sync.'
+end
+
+for arg in $argv
+    switch $arg
+        case --dry-run
+            set mode dry-run
+        case --apply
+            set mode apply
+        case -h --help
+            usage
+            exit 0
+        case '*'
+            printf 'Unknown argument: %s\n\n' "$arg" >&2
+            usage >&2
+            exit 2
+    end
+end
+
+function fail
+    printf 'error: %s\n' "$argv" >&2
+    exit 1
+end
+
+function ensure_syncthing
+    if type -q syncthing
+        return
+    end
+
+    if test "$mode" = dry-run
+        fail 'Syncthing is not installed. Re-run with --apply to install it on Arch.'
+    end
+
+    if type -q pacman
+        printf 'Installing Syncthing with pacman…\n'
+        sudo pacman -S --needed syncthing; or fail 'Syncthing installation failed.'
+    else
+        fail 'Syncthing is missing and this host is not Arch/pacman-based; install it manually.'
+    end
+end
+
+function ensure_service
+    if test "$mode" = apply
+        systemctl --user enable --now syncthing.service; or fail 'Could not enable/start syncthing.service.'
+    else
+        systemctl --user is-active --quiet syncthing.service; or fail 'syncthing.service is not active. Re-run with --apply.'
+    end
+
+    for attempt in (seq 1 30)
+        syncthing cli show system >/dev/null 2>&1; and return
+        sleep 1
+    end
+
+    fail 'Syncthing started, but its local API did not become ready within 30 seconds.'
+end
+
+ensure_syncthing
+ensure_service
+
+if test "$mode" = apply
+    mkdir -p "$folder_path"; or fail "Could not create $folder_path."
+    chmod 700 "$folder_path"; or fail "Could not set mode 700 on $folder_path."
+end
+
+set -l max_age 2592000
+if test (hostname -s) = pixelpirate
+    set max_age 5184000
+end
+
+set -lx SYNC_SETUP_MODE "$mode"
+set -lx SYNC_FOLDER_ID "$folder_id"
+set -lx SYNC_FOLDER_LABEL "$folder_label"
+set -lx SYNC_FOLDER_PATH "$folder_path"
+set -lx SYNC_EXPECTED_DEVICES (string join , $expected_devices)
+set -lx SYNC_MAX_AGE "$max_age"
+
+set -l helper "$HOME/.local/libexec/setup-syncthing-sync.py"
+if not test -f "$helper"
+    set helper (path resolve (dirname (status filename))/../libexec/private_setup-syncthing-sync.py 2>/dev/null)
+end
+
+test -f "$helper"; or fail 'The setup-syncthing-sync.py helper is missing. Apply/update the dotfiles first.'
+python3 "$helper"; or fail 'Syncthing folder setup failed.'
