@@ -79,7 +79,8 @@ if test "$mode" = apply
 end
 
 set -l max_age 2592000
-if test (hostname -s) = pixelpirate
+set -l short_hostname (string split -m 1 . (uname -n))[1]
+if test "$short_hostname" = pixelpirate
     set max_age 5184000
 end
 
