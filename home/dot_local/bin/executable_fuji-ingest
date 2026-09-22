@@ -14,7 +14,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Any
+import time
+from typing import Any, TextIO
 
 DEFAULT_ROOT = Path.home() / "pictures" / "photography"
 MANIFEST_NAME = ".fuji-ingest.json"
@@ -211,6 +212,80 @@ def prepare_resume(imported: Path, inventory: list[dict[str, Any]]) -> dict[str,
     return manifest
 
 
+def completed_download_count(
+    imported: Path, inventory: list[dict[str, Any]]
+) -> int:
+    expected = {item["name"]: item for item in inventory}
+    completed = 0
+    for path in local_files(imported):
+        item = expected.get(path.name)
+        if item is not None and size_matches(path, item["size_kib"]):
+            completed += 1
+    return completed
+
+
+def render_download_progress(
+    completed: int,
+    total: int,
+    previous_width: int,
+    output: TextIO,
+) -> int:
+    percent = round(completed / total * 100)
+    message = f"Downloading: {completed}/{total} files ({percent}%)"
+    padding = " " * max(0, previous_width - len(message))
+    output.write(f"\r{message}{padding}")
+    output.flush()
+    return len(message)
+
+
+def download_camera_files(
+    command: list[str],
+    imported: Path,
+    inventory: list[dict[str, Any]],
+    output: TextIO = sys.stdout,
+) -> tuple[int, str]:
+    total = len(inventory)
+    previous_width = 0
+    last_completed = -1
+
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as command_output:
+        process = subprocess.Popen(
+            command,
+            cwd=imported,
+            env=command_env(),
+            stdout=command_output,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        try:
+            while process.poll() is None:
+                completed = completed_download_count(imported, inventory)
+                if completed != last_completed:
+                    previous_width = render_download_progress(
+                        completed, total, previous_width, output
+                    )
+                    last_completed = completed
+                time.sleep(0.2)
+        except BaseException:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            raise
+
+        completed = completed_download_count(imported, inventory)
+        if completed != last_completed:
+            render_download_progress(completed, total, previous_width, output)
+        output.write("\n")
+        output.flush()
+
+        command_output.seek(0)
+        details = command_output.read().strip()
+        return process.returncode, details
+
+
 def verify(imported: Path, inventory: list[dict[str, Any]]) -> list[Path]:
     expected = {item["name"]: item for item in inventory}
     actual: dict[str, Path] = {}
@@ -324,15 +399,19 @@ def main() -> int:
         }
         write_json_atomic(manifest_path, manifest)
 
-    print("Downloading every camera file. Nothing will be deleted from the camera.")
-    command = ["gphoto2", "--recurse", "--get-all-files"]
+    print("Camera files will be copied without deleting them from the camera.")
+    command = ["gphoto2", "--quiet", "--recurse", "--get-all-files"]
     if args.resume:
         command.append("--skip-existing")
-    result = subprocess.run(command, cwd=imported, env=command_env(), check=False)
-    if result.returncode != 0:
+    returncode, download_output = download_camera_files(command, imported, inventory)
+    if returncode != 0:
+        detail_lines = download_output.splitlines()[-10:]
+        details = "\n".join(detail_lines)
+        suffix = f"\ngphoto2 output:\n{details}" if details else ""
         fail(
             "gphoto2 download failed. The partial batch was kept. "
             f"Retry with: fuji-ingest --date {args.date} --resume {args.slug}"
+            f"{suffix}"
         )
 
     print("Verifying downloaded names and sizes…", flush=True)
