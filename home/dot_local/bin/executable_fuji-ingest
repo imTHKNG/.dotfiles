@@ -1,0 +1,364 @@
+#!/usr/bin/env python3
+"""Ingest every file from one PTP camera into a dated photography batch."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from typing import Any
+
+DEFAULT_ROOT = Path.home() / "pictures" / "photography"
+MANIFEST_NAME = ".fuji-ingest.json"
+CHECKSUM_NAME = "SHA256SUMS"
+CONTROL_NAMES = {MANIFEST_NAME, CHECKSUM_NAME, f"{CHECKSUM_NAME}.tmp"}
+SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+FILE_RE = re.compile(r"^#\d+\s+(.+?)\s+\S+\s+(\d+) KB(?:\s|$)")
+FOLDER_RE = re.compile(r"^There (?:is|are).* folder '([^']+)'\.")
+
+
+class IngestError(RuntimeError):
+    pass
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Copy and verify every file from a camera supported by gphoto2.",
+        epilog=(
+            "Example: fuji-ingest --dry-run fuji-baseline\n"
+            "         fuji-ingest fuji-baseline"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("slug", help="batch name, using lowercase words and hyphens")
+    parser.add_argument(
+        "--date",
+        default=dt.date.today().isoformat(),
+        metavar="YYYY-MM-DD",
+        help="ingestion date used in the destination path (default: today)",
+    )
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=DEFAULT_ROOT,
+        help=f"photography root (default: {DEFAULT_ROOT})",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="inspect the camera and planned destination without writing files",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="resume an incomplete ingest after validating its existing files",
+    )
+    return parser.parse_args()
+
+
+def fail(message: str) -> None:
+    raise IngestError(message)
+
+
+def format_size(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    raise AssertionError("unreachable")
+
+
+def command_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["LC_ALL"] = "C"
+    return env
+
+
+def run_capture(arguments: list[str]) -> str:
+    result = subprocess.run(
+        arguments,
+        text=True,
+        capture_output=True,
+        env=command_env(),
+        check=False,
+    )
+    if result.returncode != 0:
+        details = result.stderr.strip() or result.stdout.strip() or "unknown error"
+        fail(f"{' '.join(arguments)} failed:\n{details}")
+    return result.stdout
+
+
+def detect_camera() -> str:
+    output = run_capture(["gphoto2", "--auto-detect"])
+    devices = [line.strip() for line in output.splitlines() if "usb:" in line]
+    if not devices:
+        fail("gphoto2 did not detect a camera. Connect and power on the Fuji, then retry.")
+    if len(devices) > 1:
+        fail("more than one camera was detected; disconnect the others and retry")
+    return devices[0]
+
+
+def camera_inventory() -> list[dict[str, Any]]:
+    output = run_capture(["gphoto2", "--list-files"])
+    folder = "/"
+    files: list[dict[str, Any]] = []
+
+    for line in output.splitlines():
+        folder_match = FOLDER_RE.match(line)
+        if folder_match:
+            folder = folder_match.group(1)
+            continue
+        file_match = FILE_RE.match(line)
+        if file_match:
+            files.append(
+                {
+                    "folder": folder,
+                    "name": file_match.group(1),
+                    "size_kib": int(file_match.group(2)),
+                }
+            )
+
+    if not files:
+        fail("the camera contains no downloadable files")
+
+    names: dict[str, list[str]] = {}
+    for item in files:
+        names.setdefault(item["name"], []).append(item["folder"])
+    duplicates = {name: folders for name, folders in names.items() if len(folders) > 1}
+    if duplicates:
+        sample = ", ".join(sorted(duplicates)[:5])
+        fail(
+            "the camera contains duplicate filenames in different folders "
+            f"({sample}). A flat ingest would overwrite files."
+        )
+
+    return sorted(files, key=lambda item: (item["folder"], item["name"]))
+
+
+def nearest_existing_parent(path: Path) -> Path:
+    candidate = path.expanduser().resolve()
+    while not candidate.exists():
+        if candidate == candidate.parent:
+            fail(f"could not find an existing parent for {path}")
+        candidate = candidate.parent
+    return candidate
+
+
+def write_json_atomic(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, delete=False
+    ) as handle:
+        json.dump(value, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        temporary = Path(handle.name)
+    temporary.replace(path)
+
+
+def load_manifest(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"could not read the incomplete ingest manifest {path}: {error}")
+
+
+def size_matches(path: Path, expected_kib: int) -> bool:
+    actual_kib = path.stat().st_size / 1024
+    return abs(actual_kib - expected_kib) <= 1.5
+
+
+def local_files(imported: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in imported.rglob("*")
+        if path.is_file() and path.name not in CONTROL_NAMES
+    )
+
+
+def prepare_resume(imported: Path, inventory: list[dict[str, Any]]) -> dict[str, Any]:
+    manifest_path = imported / MANIFEST_NAME
+    if not manifest_path.is_file():
+        fail(f"cannot resume: {manifest_path} does not exist")
+
+    manifest = load_manifest(manifest_path)
+    if manifest.get("status") != "incomplete":
+        fail(f"cannot resume an ingest with status {manifest.get('status')!r}")
+    if manifest.get("inventory") != inventory:
+        fail("the camera contents changed since the interrupted ingest; refusing to resume")
+
+    expected = {item["name"]: item for item in inventory}
+    seen: set[str] = set()
+    for path in local_files(imported):
+        if path.name in seen:
+            fail(f"duplicate local filename while resuming: {path.name}")
+        seen.add(path.name)
+        item = expected.get(path.name)
+        if item is None:
+            fail(f"unexpected file in incomplete ingest: {path}")
+        if not size_matches(path, item["size_kib"]):
+            print(f"Removing incomplete file before resume: {path.name}")
+            path.unlink()
+
+    return manifest
+
+
+def verify(imported: Path, inventory: list[dict[str, Any]]) -> list[Path]:
+    expected = {item["name"]: item for item in inventory}
+    actual: dict[str, Path] = {}
+
+    for path in local_files(imported):
+        if path.name in actual:
+            fail(f"download produced duplicate filename: {path.name}")
+        actual[path.name] = path
+
+    missing = sorted(set(expected) - set(actual))
+    extra = sorted(set(actual) - set(expected))
+    wrong_size = sorted(
+        name
+        for name in set(expected) & set(actual)
+        if not size_matches(actual[name], expected[name]["size_kib"])
+    )
+
+    problems = []
+    if missing:
+        problems.append(f"missing: {', '.join(missing[:10])}")
+    if extra:
+        problems.append(f"unexpected: {', '.join(extra[:10])}")
+    if wrong_size:
+        problems.append(f"wrong size: {', '.join(wrong_size[:10])}")
+    if problems:
+        fail("download verification failed:\n" + "\n".join(problems))
+
+    return [actual[name] for name in sorted(actual)]
+
+
+def write_checksums(batch: Path, files: list[Path]) -> None:
+    checksum_path = batch / CHECKSUM_NAME
+    temporary = checksum_path.with_suffix(".tmp")
+    with temporary.open("w", encoding="utf-8") as output:
+        for index, path in enumerate(files, start=1):
+            digest = hashlib.sha256()
+            with path.open("rb") as source:
+                for chunk in iter(lambda: source.read(4 * 1024 * 1024), b""):
+                    digest.update(chunk)
+            relative = path.relative_to(batch)
+            output.write(f"{digest.hexdigest()}  {relative}\n")
+            if index % 100 == 0 or index == len(files):
+                print(f"Checksummed {index}/{len(files)} files", flush=True)
+    temporary.replace(checksum_path)
+
+
+def main() -> int:
+    args = parse_args()
+
+    if not SLUG_RE.fullmatch(args.slug):
+        fail("slug must contain lowercase letters, numbers and single hyphens only")
+    try:
+        ingest_date = dt.date.fromisoformat(args.date)
+    except ValueError:
+        fail(f"invalid date: {args.date}; expected YYYY-MM-DD")
+
+    if shutil.which("gphoto2") is None:
+        fail("gphoto2 is not installed. On Arch, install the gphoto2 package.")
+
+    root = args.root.expanduser().resolve()
+    batch_name = f"{ingest_date.isoformat()}-{args.slug}"
+    imported = root / "imported" / str(ingest_date.year) / batch_name
+    exported = root / "exported" / str(ingest_date.year) / batch_name
+    manifest_path = imported / MANIFEST_NAME
+
+    print(f"Camera: {detect_camera()}")
+    print("Reading camera inventory…", flush=True)
+    inventory = camera_inventory()
+    total_bytes = sum(item["size_kib"] for item in inventory) * 1024
+    suffixes: dict[str, int] = {}
+    for item in inventory:
+        suffix = Path(item["name"]).suffix.upper() or "(none)"
+        suffixes[suffix] = suffixes.get(suffix, 0) + 1
+
+    disk = shutil.disk_usage(nearest_existing_parent(root))
+    reserve = max(1024**3, int(total_bytes * 0.05))
+
+    print(f"Imported destination: {imported}")
+    print(f"Exported destination: {exported}")
+    print(f"Camera files: {len(inventory)} ({format_size(total_bytes)})")
+    print("Types: " + ", ".join(f"{key} {value}" for key, value in sorted(suffixes.items())))
+    print(f"Free space: {format_size(disk.free)}")
+
+    if disk.free < total_bytes + reserve:
+        fail(
+            f"not enough free space; need {format_size(total_bytes + reserve)} "
+            "including safety margin"
+        )
+
+    if args.dry_run:
+        print("Dry run complete. No files or directories were created.")
+        return 0
+
+    if args.resume:
+        if not imported.is_dir():
+            fail(f"cannot resume: {imported} does not exist")
+        manifest = prepare_resume(imported, inventory)
+    else:
+        existing = [path for path in (imported, exported) if path.exists()]
+        if existing:
+            fail(f"destination already exists: {existing[0]}")
+        imported.mkdir(parents=True)
+        exported.mkdir(parents=True)
+        manifest = {
+            "camera": detect_camera(),
+            "created_at": dt.datetime.now().astimezone().isoformat(),
+            "destination": str(imported),
+            "exported_destination": str(exported),
+            "inventory": inventory,
+            "status": "incomplete",
+        }
+        write_json_atomic(manifest_path, manifest)
+
+    print("Downloading every camera file. Nothing will be deleted from the camera.")
+    command = ["gphoto2", "--recurse", "--get-all-files"]
+    if args.resume:
+        command.append("--skip-existing")
+    result = subprocess.run(command, cwd=imported, env=command_env(), check=False)
+    if result.returncode != 0:
+        fail(
+            "gphoto2 download failed. The partial batch was kept. "
+            f"Retry with: fuji-ingest --date {args.date} --resume {args.slug}"
+        )
+
+    print("Verifying downloaded names and sizes…", flush=True)
+    files = verify(imported, inventory)
+    print("Writing SHA-256 manifest…", flush=True)
+    write_checksums(imported, files)
+
+    manifest["completed_at"] = dt.datetime.now().astimezone().isoformat()
+    manifest["status"] = "complete"
+    manifest["sha256_manifest"] = CHECKSUM_NAME
+    write_json_atomic(manifest_path, manifest)
+
+    print()
+    print(f"Ingest complete: {len(files)} files in {imported}")
+    print(f"Checksums: {imported / CHECKSUM_NAME}")
+    print(f"Add this directory to the darktable library: {imported}")
+    print("Keep the camera card unchanged until a second copy has been verified.")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except IngestError as error:
+        print(f"fuji-ingest: error: {error}", file=sys.stderr)
+        raise SystemExit(1)
+    except KeyboardInterrupt:
+        print("\nfuji-ingest: interrupted; camera files were not deleted", file=sys.stderr)
+        raise SystemExit(130)

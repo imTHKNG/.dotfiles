@@ -49,7 +49,32 @@ This repo currently manages, among others:
 - `~/.local/bin/cheat`
 - `~/.local/bin/dotfiles-setup`
 - `~/.local/bin/fish-regenerate-completions`
+- `~/.local/bin/fuji-ingest`
 - `~/.local/bin/omarchy-webapp-install` / `web2app` helpers
+
+## Fujifilm photo ingestion
+
+`fuji-ingest` copies every file from one camera exposed through `gphoto2` into a new dated batch. It verifies names and reported sizes, then writes `SHA256SUMS`. It never deletes camera files.
+
+Preview an ingest:
+
+```bash
+fuji-ingest --dry-run fuji-baseline
+```
+
+Create matching batches under `~/pictures/photography/imported/<year>/<date>-fuji-baseline` and `~/pictures/photography/exported/<year>/<date>-fuji-baseline`, then download the card into the imported batch:
+
+```bash
+fuji-ingest fuji-baseline
+```
+
+If the transfer stops, leave the partial batch in place and resume it:
+
+```bash
+fuji-ingest --resume fuji-baseline
+```
+
+Use `--date YYYY-MM-DD` when resuming on a later day or assigning a different ingestion date. Keep the card unchanged until the imported files have a verified second copy.
 
 ## Tmux plugins
 
