@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import importlib.machinery
+import importlib.util
 import io
 from pathlib import Path
 import sys
@@ -16,9 +17,12 @@ SCRIPT = (
     / "bin"
     / "executable_fuji-ingest"
 )
-fuji_ingest = importlib.machinery.SourceFileLoader(
-    "fuji_ingest", str(SCRIPT)
-).load_module()
+sys.dont_write_bytecode = True
+loader = importlib.machinery.SourceFileLoader("fuji_ingest", str(SCRIPT))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+assert spec is not None
+fuji_ingest = importlib.util.module_from_spec(spec)
+loader.exec_module(fuji_ingest)
 
 
 class TtyBuffer(io.StringIO):
