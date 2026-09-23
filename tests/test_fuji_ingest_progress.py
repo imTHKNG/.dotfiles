@@ -79,7 +79,9 @@ class DownloadProgressTest(unittest.TestCase):
 
 
 class IngestDirectoryTest(unittest.TestCase):
-    def run_ingest(self, root: Path, *, resume: bool = False, dry_run: bool = False) -> str:
+    def run_ingest(
+        self, root: Path, *, resume: bool = False, dry_run: bool = False, error: bool = False
+    ) -> str:
         inventory = [{"folder": "/camera", "name": "DSCF0001.JPG", "size_kib": 1}]
         args = argparse.Namespace(
             slug="test-batch",
@@ -105,24 +107,37 @@ class IngestDirectoryTest(unittest.TestCase):
                     patch.object(fuji_ingest, "write_checksums"),
                 ):
                     self.assertEqual(fuji_ingest.main(), 0)
-            else:
+            elif error:
                 with self.assertRaisesRegex(fuji_ingest.IngestError, "destination already exists"):
                     fuji_ingest.main()
+            else:
+                with (
+                    patch.object(fuji_ingest, "download_camera_files", return_value=(0, "")),
+                    patch.object(fuji_ingest, "verify", return_value=[]),
+                    patch.object(fuji_ingest, "write_checksums"),
+                ):
+                    self.assertEqual(fuji_ingest.main(), 0)
         return output.getvalue()
 
-    def test_new_batches_use_year_at_root_and_separate_temporary_exports(self) -> None:
+    def test_new_batches_create_only_the_originals_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             output = self.run_ingest(root, dry_run=True)
-            self.assertIn(str(root / "2026/2026-09-23-test-batch"), output)
-            self.assertIn(str(root / "_exported/2026/2026-09-23-test-batch"), output)
-            self.assertFalse((root / "2026").exists())
+            batch = root / "2026/2026-09-23-test-batch"
+            self.assertIn(str(batch), output)
+            self.assertNotIn("Exported destination", output)
+            self.assertFalse(batch.exists())
+
+            self.run_ingest(root)
+            self.assertTrue(batch.is_dir())
+            self.assertFalse((root / "_exported").exists())
+            self.assertNotIn("exported_destination", json.loads((batch / ".fuji-ingest.json").read_text()))
 
     def test_existing_legacy_batch_blocks_accidental_duplicate_ingest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "imported/2026/2026-09-23-test-batch").mkdir(parents=True)
-            self.run_ingest(root)
+            self.run_ingest(root, error=True)
             self.assertFalse((root / "2026").exists())
 
     def test_resume_of_incomplete_legacy_batch_stays_at_original_path(self) -> None:
@@ -139,7 +154,7 @@ class IngestDirectoryTest(unittest.TestCase):
             )
             output = self.run_ingest(root, resume=True)
             self.assertIn(f"Imported destination: {old_batch}", output)
-            self.assertIn(str(root / "exported/2026/2026-09-23-test-batch"), output)
+            self.assertNotIn("Exported destination", output)
             self.assertFalse((root / "2026").exists())
 
 

@@ -62,7 +62,7 @@ Preview an ingest:
 fuji-ingest --dry-run fuji-baseline
 ```
 
-Create the original batch at `~/pictures/photography/<year>/<date>-fuji-baseline` and an empty temporary export directory at `~/pictures/photography/_exported/<year>/<date>-fuji-baseline`, then download the card into the original batch:
+Download the card into a new original batch at `~/pictures/photography/<year>/<date>-fuji-baseline`. `fuji-ingest` does not create an export directory; make temporary exports from darktable when needed:
 
 ```bash
 fuji-ingest fuji-baseline

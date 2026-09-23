@@ -348,11 +348,9 @@ def main() -> int:
     root = args.root.expanduser().resolve()
     batch_name = f"{ingest_date.isoformat()}-{args.slug}"
     imported = root / str(ingest_date.year) / batch_name
-    exported = root / "_exported" / str(ingest_date.year) / batch_name
     legacy_imported = root / "imported" / str(ingest_date.year) / batch_name
     if args.resume and not imported.exists() and legacy_imported.is_dir():
         imported = legacy_imported
-        exported = root / "exported" / str(ingest_date.year) / batch_name
     manifest_path = imported / MANIFEST_NAME
 
     print(f"Camera: {detect_camera()}")
@@ -368,7 +366,6 @@ def main() -> int:
     reserve = max(1024**3, int(total_bytes * 0.05))
 
     print(f"Imported destination: {imported}")
-    print(f"Exported destination: {exported}")
     print(f"Camera files: {len(inventory)} ({format_size(total_bytes)})")
     print("Types: " + ", ".join(f"{key} {value}" for key, value in sorted(suffixes.items())))
     print(f"Free space: {format_size(disk.free)}")
@@ -388,16 +385,14 @@ def main() -> int:
             fail(f"cannot resume: {imported} does not exist")
         manifest = prepare_resume(imported, inventory)
     else:
-        existing = [path for path in (imported, exported, legacy_imported) if path.exists()]
+        existing = [path for path in (imported, legacy_imported) if path.exists()]
         if existing:
             fail(f"destination already exists: {existing[0]}")
         imported.mkdir(parents=True)
-        exported.mkdir(parents=True)
         manifest = {
             "camera": detect_camera(),
             "created_at": dt.datetime.now().astimezone().isoformat(),
             "destination": str(imported),
-            "exported_destination": str(exported),
             "inventory": inventory,
             "status": "incomplete",
         }
