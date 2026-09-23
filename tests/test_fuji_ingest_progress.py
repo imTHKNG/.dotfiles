@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 
+import argparse
+from contextlib import redirect_stdout
 import importlib.machinery
 import importlib.util
 import io
+import json
 from pathlib import Path
 import sys
 import tempfile
 import textwrap
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT = (
@@ -72,6 +76,71 @@ class DownloadProgressTest(unittest.TestCase):
             self.assertNotIn("child downloading", output.getvalue())
             self.assertEqual(output.getvalue().count("\n"), 1)
             self.assertIn("Downloading: 3/3 files (100%)", output.getvalue())
+
+
+class IngestDirectoryTest(unittest.TestCase):
+    def run_ingest(self, root: Path, *, resume: bool = False, dry_run: bool = False) -> str:
+        inventory = [{"folder": "/camera", "name": "DSCF0001.JPG", "size_kib": 1}]
+        args = argparse.Namespace(
+            slug="test-batch",
+            date="2026-09-23",
+            root=root,
+            dry_run=dry_run,
+            resume=resume,
+        )
+        output = io.StringIO()
+        with (
+            patch.object(fuji_ingest, "parse_args", return_value=args),
+            patch.object(fuji_ingest, "detect_camera", return_value="Fuji"),
+            patch.object(fuji_ingest, "camera_inventory", return_value=inventory),
+            patch.object(fuji_ingest.shutil, "which", return_value="/usr/bin/gphoto2"),
+            redirect_stdout(output),
+        ):
+            if dry_run:
+                self.assertEqual(fuji_ingest.main(), 0)
+            elif resume:
+                with (
+                    patch.object(fuji_ingest, "download_camera_files", return_value=(0, "")),
+                    patch.object(fuji_ingest, "verify", return_value=[]),
+                    patch.object(fuji_ingest, "write_checksums"),
+                ):
+                    self.assertEqual(fuji_ingest.main(), 0)
+            else:
+                with self.assertRaisesRegex(fuji_ingest.IngestError, "destination already exists"):
+                    fuji_ingest.main()
+        return output.getvalue()
+
+    def test_new_batches_use_year_at_root_and_separate_temporary_exports(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = self.run_ingest(root, dry_run=True)
+            self.assertIn(str(root / "2026/2026-09-23-test-batch"), output)
+            self.assertIn(str(root / "_exported/2026/2026-09-23-test-batch"), output)
+            self.assertFalse((root / "2026").exists())
+
+    def test_existing_legacy_batch_blocks_accidental_duplicate_ingest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "imported/2026/2026-09-23-test-batch").mkdir(parents=True)
+            self.run_ingest(root)
+            self.assertFalse((root / "2026").exists())
+
+    def test_resume_of_incomplete_legacy_batch_stays_at_original_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old_batch = root / "imported/2026/2026-09-23-test-batch"
+            old_batch.mkdir(parents=True)
+            (old_batch / ".fuji-ingest.json").write_text(
+                json.dumps({
+                    "status": "incomplete",
+                    "inventory": [{"folder": "/camera", "name": "DSCF0001.JPG", "size_kib": 1}],
+                }),
+                encoding="utf-8",
+            )
+            output = self.run_ingest(root, resume=True)
+            self.assertIn(f"Imported destination: {old_batch}", output)
+            self.assertIn(str(root / "exported/2026/2026-09-23-test-batch"), output)
+            self.assertFalse((root / "2026").exists())
 
 
 if __name__ == "__main__":

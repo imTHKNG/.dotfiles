@@ -62,7 +62,7 @@ Preview an ingest:
 fuji-ingest --dry-run fuji-baseline
 ```
 
-Create matching batches under `~/pictures/photography/imported/<year>/<date>-fuji-baseline` and `~/pictures/photography/exported/<year>/<date>-fuji-baseline`, then download the card into the imported batch:
+Create the original batch at `~/pictures/photography/<year>/<date>-fuji-baseline` and an empty temporary export directory at `~/pictures/photography/_exported/<year>/<date>-fuji-baseline`, then download the card into the original batch:
 
 ```bash
 fuji-ingest fuji-baseline
@@ -74,7 +74,7 @@ If the transfer stops, leave the partial batch in place and resume it:
 fuji-ingest --resume fuji-baseline
 ```
 
-Use `--date YYYY-MM-DD` when resuming on a later day or assigning a different ingestion date. Keep the card unchanged until the imported files have a verified second copy.
+Use `--date YYYY-MM-DD` when resuming on a later day or assigning a different ingestion date. An incomplete batch created under the old `imported/` layout can still be resumed there. `fuji-ingest` verifies the local copy but does not create a second copy. Formatting the card before a verified backup leaves the computer as the only copy.
 
 ## Tmux plugins
 

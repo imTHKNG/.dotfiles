@@ -347,8 +347,12 @@ def main() -> int:
 
     root = args.root.expanduser().resolve()
     batch_name = f"{ingest_date.isoformat()}-{args.slug}"
-    imported = root / "imported" / str(ingest_date.year) / batch_name
-    exported = root / "exported" / str(ingest_date.year) / batch_name
+    imported = root / str(ingest_date.year) / batch_name
+    exported = root / "_exported" / str(ingest_date.year) / batch_name
+    legacy_imported = root / "imported" / str(ingest_date.year) / batch_name
+    if args.resume and not imported.exists() and legacy_imported.is_dir():
+        imported = legacy_imported
+        exported = root / "exported" / str(ingest_date.year) / batch_name
     manifest_path = imported / MANIFEST_NAME
 
     print(f"Camera: {detect_camera()}")
@@ -384,7 +388,7 @@ def main() -> int:
             fail(f"cannot resume: {imported} does not exist")
         manifest = prepare_resume(imported, inventory)
     else:
-        existing = [path for path in (imported, exported) if path.exists()]
+        existing = [path for path in (imported, exported, legacy_imported) if path.exists()]
         if existing:
             fail(f"destination already exists: {existing[0]}")
         imported.mkdir(parents=True)
