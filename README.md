@@ -39,6 +39,7 @@ This repo currently manages, among others:
 - `~/.config/starship.toml`
 - `~/.config/alacritty/...`
 - `~/.config/ghostty/...`
+- `~/.config/herdr/config.toml`
 - `~/.config/bat/...`
 - `~/.config/fastfetch/...`
 - `~/.config/gitui/...`
