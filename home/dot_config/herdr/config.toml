@@ -16,6 +16,7 @@ navigate_pane_up = "up"
 
 [ui]
 prompt_new_tab_name = false
+tab_bar_position = "bottom"
 
 [ui.toast]
 delivery = "system"
