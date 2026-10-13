@@ -24,5 +24,7 @@ delivery = "system"
 enabled = false
 
 [theme]
-name = "catppuccin-latte"
-auto_switch = false
+name = "catppuccin"
+auto_switch = true
+light_name = "catppuccin-latte"
+dark_name = "catppuccin"

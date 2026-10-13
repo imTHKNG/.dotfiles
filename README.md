@@ -140,6 +140,14 @@ kde-theme dark
 
 From SSH, the command runs through the graphical session's systemd user manager.
 
+Herdr follows light/dark appearance notifications from the host terminal through `[theme].auto_switch` in `~/.config/herdr/config.toml`. Ghostty is configured with light and dark palettes; Herdr selects `catppuccin-latte` in light mode and `catppuccin` in dark mode. No extra systemd watcher is needed when the terminal reports appearance changes. Selecting a theme manually in Herdr Settings disables auto-switching.
+
+After changing Herdr's config, reload it without stopping the panes:
+
+```fish
+herdr server reload-config
+```
+
 Tmux follows the KDE light/dark color scheme via:
 
 - `~/.local/bin/tmux-sync-theme`
