@@ -14,6 +14,9 @@ navigate_workspace_up = "k"
 navigate_pane_down = "down"
 navigate_pane_up = "up"
 
+[ui]
+prompt_new_tab_name = false
+
 [ui.toast]
 delivery = "system"
 
