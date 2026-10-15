@@ -1,0 +1,22 @@
+# Rendered locally by cli-proxy-setup. Never store the rendered file in Git.
+config-version: 8
+server:
+  host: "127.0.0.1"
+  port: 8317
+access:
+  api-keys:
+    - "__LOCAL_PROXY_KEY__"
+oauth:
+  auth-dir: "__AUTH_DIR__"
+management:
+  allow-remote: false
+  secret-key: ""
+  disable-control-panel: true
+  disable-auto-update-panel: true
+plugins:
+  enabled: false
+observability:
+  logs:
+    debug: false
+    logging-to-file: false
+    request-log: false

@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""Prepare machine-local CLIProxyAPI files without logging in or starting services."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import stat
+import sys
+import tempfile
+
+
+PROVIDER = "claude-pro-proxy"
+
+
+class SetupError(Exception):
+    pass
+
+
+def regular_file(path):
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise SetupError(f"Expected a regular file, not a symlink: {path}")
+
+
+def private_directory(path):
+    if path.is_symlink() or (path.exists() and not path.is_dir()):
+        raise SetupError(f"Expected a directory, not a symlink: {path}")
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.chmod(0o700)
+
+
+def write_private(path, content):
+    """Replace a file atomically; sensitive temporary files are always mode 0600."""
+    regular_file(path)
+    fd, temp = tempfile.mkstemp(prefix=".cli-proxy-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(content)
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
+def backup(path, root):
+    directory = root / "backups"
+    private_directory(directory)
+    fd, destination = tempfile.mkstemp(prefix=path.name + ".", dir=directory)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(path.read_bytes())
+
+
+def prepare(home, managed, refresh):
+    root = home / ".local/share/cliproxyapi-opus-test"
+    key_path = root / "proxy-key"
+    config_path = root / "config.native.yaml"
+    auth = root / "auth-native"
+    models_path = home / ".pi/agent/models.json"
+
+    # Check conflicts before creating any machine-local state.
+    for path in (key_path, config_path, models_path):
+        regular_file(path)
+    for path in (root, auth):
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            raise SetupError(f"Expected a directory, not a symlink: {path}")
+
+    provider = json.loads((managed / "pi-provider.json").read_text())
+    models = json.loads(models_path.read_text()) if models_path.exists() else {}
+    if not isinstance(models, dict) or not isinstance(models.get("providers", {}), dict):
+        raise SetupError("Pi models.json must contain a providers object.")
+    existing = models.get("providers", {}).get(PROVIDER)
+    if existing is not None and existing != provider:
+        raise SetupError("Pi already has a different claude-pro-proxy provider; left unchanged.")
+
+    template = (managed / "config.template.yaml").read_text()
+    for marker in ('"__LOCAL_PROXY_KEY__"', '"__AUTH_DIR__"'):
+        if template.count(marker) != 1:
+            raise SetupError("The managed config template has invalid placeholders.")
+
+    if key_path.exists():
+        if key_path.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            raise SetupError("The local proxy key must be private; expected mode 0600.")
+        key = key_path.read_text().strip()
+        if not re.fullmatch(r"[0-9a-f]{64}", key):
+            raise SetupError("The existing local proxy key has an unexpected format.")
+    elif config_path.exists():
+        raise SetupError("Config exists without its local key; refusing to generate a different key.")
+    else:
+        key = secrets.token_hex(32)
+
+    private_directory(root)
+    private_directory(auth)
+    if not key_path.exists():
+        write_private(key_path, key + "\n")
+
+    rendered = template.replace('"__LOCAL_PROXY_KEY__"', json.dumps(key))
+    rendered = rendered.replace('"__AUTH_DIR__"', json.dumps(str(auth)))
+    if not config_path.exists():
+        write_private(config_path, rendered)
+    elif refresh:
+        if config_path.read_text() != rendered:
+            backup(config_path, root)
+            write_private(config_path, rendered)
+    else:
+        print("Existing native config preserved. Use --refresh-config to render the managed template.")
+
+    if existing is None:
+        if models_path.exists():
+            backup(models_path, root)
+        models.setdefault("providers", {})[PROVIDER] = provider
+        models_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        write_private(models_path, json.dumps(models, indent=2) + "\n")
+
+    print("Local proxy config and Pi provider ready. OAuth credentials were not copied or changed.")
+    print("No service started. Log in locally, then enable cli-proxy-api.service.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--refresh-config", action="store_true",
+        help="Re-render the native config, backing up the previous file and retaining the local key.",
+    )
+    args = parser.parse_args()
+    home = Path.home()
+    managed = Path(os.environ.get("XDG_CONFIG_HOME", str(home / ".config"))) / "cli-proxy-api"
+    try:
+        prepare(home, managed, args.refresh_config)
+    except (SetupError, OSError, ValueError):
+        # Do not print exception payloads: they may contain file contents or credentials.
+        print("cli-proxy-setup: preparation failed; existing credentials were not replaced.", file=sys.stderr)
+        print("Check file types, private key permissions, JSON, template placeholders and provider conflicts.", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

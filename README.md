@@ -77,6 +77,48 @@ fuji-ingest --resume fuji-baseline
 
 Use `--date YYYY-MM-DD` when resuming on a later day or assigning a different ingestion date. An incomplete batch created under the old `imported/` layout can still be resumed there. `fuji-ingest` verifies the local copy but does not create a second copy. Formatting the card before a verified backup leaves the computer as the only copy.
 
+## CLIProxyAPI and Claude Pro in Pi
+
+This optional setup shares the systemd override, a config template without credentials, and the Pi provider definition. OAuth tokens, the local proxy key and the rendered native config stay outside Git and chezmoi. Anthropic does not officially support using Pro OAuth credentials in third-party clients; account restrictions remain possible.
+
+On another Arch machine with a systemd user manager:
+
+```fish
+paru -S cli-proxy-api-bin
+chezmoi apply
+~/.local/bin/cli-proxy-setup
+cli-proxy-api --config ~/.local/share/cliproxyapi-opus-test/config.native.yaml --claude-login --no-browser
+systemctl --user daemon-reload
+systemctl --user enable --now cli-proxy-api.service
+systemctl --user is-active cli-proxy-api.service
+```
+
+Complete the Claude login in your browser before enabling the service. No SSH tunnel is needed when the browser and proxy are on the same machine. Do not copy OAuth tokens between machines.
+
+`cli-proxy-setup` uses Python 3 without third-party modules. It creates private local files and adds `claude-pro-proxy` to Pi's `~/.pi/agent/models.json` without replacing other providers. It preserves an existing proxy config and OAuth directory. It never installs packages, logs in, starts services or enables linger. A conflicting provider causes it to stop rather than overwrite the existing settings.
+
+The service uses `~/.local/share/cliproxyapi-opus-test/config.native.yaml` and binds the API to `127.0.0.1:8317`. The directory name is retained for compatibility with the original Velvet setup. It hides unrelated home files, allows OAuth refresh writes and keeps file logs in a 64 MiB tmpfs. This requires Linux user and mount namespace support. Other operating systems need a different service setup.
+
+For startup before login, inspect `loginctl show-user $USER -p Linger`. Enable linger separately if wanted. Velvet already has it enabled. Do not start a manual proxy and the systemd service on the same port.
+
+After setup, open `/model` in Pi and choose `claude-pro-proxy`. The provider reads the machine-local key at request time; no environment variable or secret copied into Pi's model configuration is required.
+
+To apply a later change to the shared proxy template:
+
+```fish
+chezmoi apply ~/.config/cli-proxy-api/config.template.yaml
+~/.local/bin/cli-proxy-setup --refresh-config
+systemctl --user restart cli-proxy-api.service
+```
+
+`--refresh-config` backs up the previous config privately and keeps the same local key and OAuth directory. Backups stay under the local runtime directory, never in the dotfiles source. Existing machine-specific config changes will be replaced by the shared template only when this flag is explicitly used.
+
+Test the helper with isolated temporary home directories:
+
+```fish
+python3 -m unittest discover -s tests -p test_cli_proxy_setup.py -v
+```
+
 ## Tmux plugins
 
 Tmux plugins are managed with [TPM](https://github.com/tmux-plugins/tpm), the Tmux Plugin Manager.

@@ -1,0 +1,15 @@
+{
+  "baseUrl": "http://127.0.0.1:8317",
+  "api": "anthropic-messages",
+  "apiKey": "!python3 -c \"from pathlib import Path; print((Path.home() / '.local/share/cliproxyapi-opus-test/proxy-key').read_text().strip())\"",
+  "models": [
+    {
+      "id": "claude-opus-5-5",
+      "name": "Opus 5.5 via local Claude Pro proxy",
+      "reasoning": true,
+      "input": ["text", "image"],
+      "contextWindow": 200000,
+      "maxTokens": 16384
+    }
+  ]
+}
