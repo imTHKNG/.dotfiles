@@ -1,0 +1,11 @@
+{
+  "zoom": 1.1,
+  "sounds": {
+    "enabled": false
+  },
+  "minimum_contrast": 1.0,
+  "theme": {
+    "light": "catppuccin-latte",
+    "dark": "catppuccin"
+  }
+}

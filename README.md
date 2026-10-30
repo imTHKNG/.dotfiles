@@ -190,6 +190,8 @@ After changing Herdr's config, reload it without stopping the panes:
 herdr server reload-config
 ```
 
+The Herdr desktop app has a separate configuration under `~/.config/herdr-app/`. The personal `knth` layout puts tabs at the bottom, and a local mod preserves the Ctrl+B prefix and navigation keys. See [Herdr desktop settings](docs/herdr-app.md) for the key map, checks, and migration limits, including custom theme rendering and system notifications.
+
 Tmux follows the KDE light/dark color scheme via:
 
 - `~/.local/bin/tmux-sync-theme`
