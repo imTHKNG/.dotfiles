@@ -3,7 +3,8 @@ onboarding = false
 [keys]
 split_vertical = ["prefix+v", "prefix+|"]
 detach = ["prefix+q", "prefix+d"]
-workspace_picker = ["prefix+g", "prefix+s"]
+workspace_picker = "prefix+w"
+goto = ["prefix+g", "prefix+s"]
 settings = "prefix+;"
 next_agent = "prefix+a"
 previous_agent = "prefix+shift+a"
