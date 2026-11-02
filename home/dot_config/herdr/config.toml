@@ -6,8 +6,8 @@ default_shell = "fish"
 [keys]
 split_vertical = ["prefix+v", "prefix+|"]
 detach = ["prefix+q", "prefix+d"]
-workspace_picker = "prefix+w"
-goto = ["prefix+g", "prefix+s"]
+workspace_picker = ["prefix+w", "prefix+s"]
+goto = "prefix+g"
 settings = "prefix+;"
 next_agent = "prefix+a"
 previous_agent = "prefix+shift+a"
