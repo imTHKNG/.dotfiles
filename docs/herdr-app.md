@@ -2,7 +2,8 @@
 
 The desktop app uses `~/.config/herdr-app/`, separately from the old terminal
 app's `~/.config/herdr/config.toml`. Both configurations stay in chezmoi.
-The old config is unchanged.
+In the terminal app, Ctrl+B then `s` or `g` opens `goto`; `w` opens the
+workspace picker. The desktop bindings below remain separate.
 
 ## Files
 
@@ -14,7 +15,7 @@ The old config is unchanged.
 - `themes/catppuccin*.json` use the locally installed Ghostty Catppuccin
   palettes, with Catppuccin panel colors.
 - `layouts/knth.json` is a personal clone of Herdr 0.1.9's `main` layout,
-  with tabs below the terminal area. Shipped files remain untouched.
+  with tabs above the terminal area. Shipped files remain untouched.
 - `mods/legacy-keys/` implements prefix mode and the space/pane picker.
   It does not run programs, access files or use the network.
 

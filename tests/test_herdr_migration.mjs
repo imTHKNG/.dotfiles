@@ -126,7 +126,7 @@ test("settings, direct bindings, themes and personal layout migrate correctly", 
   assert.equal(keys.global["ctrl-shift-t"], "tab.new");
   const layout = json("layouts/knth.json");
   const work = layout.children.find(n => n.id === "work");
-  assert.deepEqual(work.children.map(n => n.id), ["work-body", "tabs", "status"]);
+  assert.deepEqual(work.children.map(n => n.id), ["tabs", "work-body", "status"]);
   assert.equal(layout.cloned_from.name, "main");
   for (const name of Object.values(settings.theme)) {
     const theme = json(`themes/${name}.json`);

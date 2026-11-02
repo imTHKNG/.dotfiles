@@ -78,6 +78,17 @@
       "type": "column",
       "children": [
         {
+          "id": "tabs",
+          "type": "block",
+          "content": {
+            "mod": "tabs"
+          },
+          "size": {
+            "px": 42
+          },
+          "window_drag": true
+        },
+        {
           "id": "work-body",
           "type": "row",
           "children": [
@@ -146,17 +157,6 @@
           ],
           "padding": 8,
           "gap": 8
-        },
-        {
-          "id": "tabs",
-          "type": "block",
-          "content": {
-            "mod": "tabs"
-          },
-          "size": {
-            "px": 42
-          },
-          "window_drag": true
         },
         {
           "id": "status",
