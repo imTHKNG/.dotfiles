@@ -48,6 +48,7 @@ trufflehog = "3.99.4"
 herdr = "latest"
 "npm:cf" = "1.0.0-beta.21"
 aws-cli = { version = "2.38.5", symlink_bins = "true" }
+"http:herdr-core" = { version = "0.1.16", url = "https://releases.herdr.dev/core/{{ version }}/herdr-core-linux-x86_64.tar.gz", rename_exe = "herdr-core", checksum = "sha256:58d6861176dc6fe905b58880d5bff07a9959be613a98e5d66b4583b04b6cfa45" }
 
 [settings]
 minimum_release_age = "7d"
