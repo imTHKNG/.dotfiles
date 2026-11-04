@@ -2,39 +2,32 @@
   "env": {
     "DISABLE_AUTOUPDATER": "1"
   },
-  "enabledPlugins": {
-    "example-skills@anthropic-agent-skills": false,
-    "superpowers@superpowers-marketplace": true
-  },
-  "feedbackSurveyState": {
-    "lastShownTime": 1753967732970
-  },
   "hooks": {
     "Notification": [
       {
+        "matcher": "permission_prompt|elicitation_dialog",
         "hooks": [
           {
-            "command": "workmux set-window-status waiting",
-            "type": "command"
+            "type": "command",
+            "command": "workmux set-window-status waiting"
           }
-        ],
-        "matcher": "permission_prompt|elicitation_dialog"
+        ]
       }
     ],
     "PostToolUse": [
       {
         "hooks": [
           {
-            "command": "node \"/home/knth/.claude/hooks/gsd-context-monitor.js\"",
-            "type": "command"
+            "type": "command",
+            "command": "node \"/home/knth/.claude/hooks/gsd-context-monitor.js\""
           }
         ]
       },
       {
         "hooks": [
           {
-            "command": "workmux set-window-status working",
-            "type": "command"
+            "type": "command",
+            "command": "workmux set-window-status working"
           }
         ]
       }
@@ -43,19 +36,19 @@
       {
         "hooks": [
           {
-            "command": "node \"/home/knth/.claude/hooks/gsd-check-update.js\"",
-            "type": "command"
+            "type": "command",
+            "command": "node \"/home/knth/.claude/hooks/gsd-check-update.js\""
           }
         ]
       },
       {
+        "matcher": "startup|resume|clear|fork",
         "hooks": [
           {
-            "command": "workmux register-agent",
-            "type": "command"
+            "type": "command",
+            "command": "workmux register-agent"
           }
-        ],
-        "matcher": "startup|resume|clear|fork"
+        ]
       },
       {
         "matcher": "^(startup|resume|clear|compact|fork)$",
@@ -72,8 +65,8 @@
       {
         "hooks": [
           {
-            "command": "workmux set-window-status done",
-            "type": "command"
+            "type": "command",
+            "command": "workmux set-window-status done"
           }
         ]
       }
@@ -82,16 +75,25 @@
       {
         "hooks": [
           {
-            "command": "workmux set-window-status working",
-            "type": "command"
+            "type": "command",
+            "command": "workmux set-window-status working"
           }
         ]
       }
     ]
   },
-  "skipAutoPermissionPrompt": true,
   "statusLine": {
-    "command": "bash ~/.claude/statusline-command.sh",
-    "type": "command"
+    "type": "command",
+    "command": "bash ~/.claude/statusline-command.sh"
+  },
+  "enabledPlugins": {
+    "example-skills@anthropic-agent-skills": false,
+    "superpowers@superpowers-marketplace": true
+  },
+  "editorMode": "vim",
+  "verbose": true,
+  "preferredNotifChannel": "terminal_bell",
+  "feedbackSurveyState": {
+    "lastShownTime": 1753967732970
   }
 }
