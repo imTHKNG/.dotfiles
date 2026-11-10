@@ -49,7 +49,7 @@ trufflehog = "3.99.4"
 herdr = "latest"
 "npm:cf" = "1.0.0-beta.21"
 aws-cli = { version = "2.38.5", symlink_bins = "true" }
-"http:herdr-core" = { version = "0.1.16", url = "https://releases.herdr.dev/core/{{ version }}/herdr-core-linux-x86_64.tar.gz", rename_exe = "herdr-core", checksum = "sha256:58d6861176dc6fe905b58880d5bff07a9959be613a98e5d66b4583b04b6cfa45" }
+"aqua:herdrdev/herdr-core" = "0.1.17"
 "http:herdr-app" = { version = "0.1.9", url = "https://releases.herdr.dev/app/{{ version }}/herdr-app-linux-x86_64.tar.gz", checksum = "sha256:da6f7b40f6c416c5b4def8dbcf8b76677d02be4f4b45d06a4d658766850e0b45" }
 
 [settings]
