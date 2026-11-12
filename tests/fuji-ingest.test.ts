@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -14,11 +15,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { repo, pythonInterpreter, requireCommand, run, temporaryDirectory } from "./support";
+import { repo, requireCommand, run, temporaryDirectory } from "./support";
 
-const python = pythonInterpreter();
 const script = join(repo, "home/dot_local/bin/executable_fuji-ingest");
-const command = [python, script];
+const command = [process.execPath, script];
 const date = "2026-09-23";
 const slug = "test-batch";
 const retry = `fuji-ingest --date ${date} --resume ${slug}`;
@@ -930,6 +930,28 @@ for (const group of [false, true]) {
     expect(manifest().status).toBe("incomplete");
   });
 }
+
+test("the installed script runs through its Bun shebang without a file extension", async () => {
+  // chezmoi installs executable_fuji-ingest as an executable ~/.local/bin/fuji-ingest.
+  const installed = join(temporary.path, "fuji-ingest");
+  copyFileSync(script, installed);
+  chmodSync(installed, 0o755);
+  const bunDirectory = process.execPath.slice(0, process.execPath.lastIndexOf("/"));
+  const env = environment({ PATH: `${bin}:${toolDirectory}:${bunDirectory}` });
+
+  const result = await run([installed, "--root", root, "--date", date, "--dry-run", slug], { env });
+  const usage = await run([installed], { env });
+
+  expect(result.exitCode, result.stderr).toBe(0);
+  expect(result.stdout).toContain(`Imported destination: ${batch}\n`);
+  expect(usage.exitCode).toBe(2);
+  expect(usage.stderr).toBe(
+    "usage: fuji-ingest [-h] [--date YYYY-MM-DD] [--root ROOT] [--dry-run]\n" +
+      "                   [--resume]\n" +
+      "                   slug\n" +
+      "fuji-ingest: error: the following arguments are required: slug\n",
+  );
+});
 
 test("sizes are rounded half to even like Python", async () => {
   camera([{ name: "DSCF0001.RAF", kib: 1280 }]);
