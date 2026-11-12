@@ -51,7 +51,7 @@ This repo currently manages, among others:
 - `~/.local/bin/dotfiles-setup`
 - `~/.local/bin/fish-regenerate-completions`
 - `~/.local/bin/fuji-ingest`
-- `~/.local/bin/omarchy-webapp-install` / `web2app` helpers
+- `web2app` / `web2app-remove` Fish helpers
 
 ## Web app launchers
 

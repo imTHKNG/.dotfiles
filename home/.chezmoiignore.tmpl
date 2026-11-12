@@ -1,11 +1,2 @@
-# Exclude desktop-only helpers from non-desktop and unknown hosts.
-{{- with index .machines .chezmoi.hostname }}
-{{- if not .isDesktop }}
-.local/bin/omarchy-webapp-install
-{{- end }}
-{{- else }}
-.local/bin/omarchy-webapp-install
-{{- end }}
-
 # Neovim lazy.nvim lockfile is machine-local/generated.
 .config/nvim/lazy-lock.json
