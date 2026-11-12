@@ -5,3 +5,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now tmux-sync-theme.path
 systemctl --user --no-pager --full status tmux-sync-theme.path
 """
+
+[tasks.test]
+description = "Run the dotfiles test suite with Bun"
+run = "bun test tests"

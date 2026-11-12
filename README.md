@@ -25,6 +25,16 @@ chezmoi apply
 ~/.local/bin/dotfiles-setup
 ```
 
+## Tests
+
+Run every test with:
+
+```fish
+mise run test
+```
+
+The task runs `bun test tests`. The tests also need Python 3 and Fish, because they exercise the real helpers in temporary directories.
+
 ## Managed files
 
 This repo currently manages, among others:
@@ -75,7 +85,7 @@ web2app-remove WhatsApp
 Run the isolated tests with:
 
 ```fish
-python3 -m unittest tests/test_web2app.py -v
+bun test tests/web2app.test.ts
 ```
 
 ## Fujifilm photo ingestion
@@ -141,7 +151,7 @@ systemctl --user restart cli-proxy-api.service
 Test the helper with isolated temporary home directories:
 
 ```fish
-python3 -m unittest discover -s tests -p test_cli_proxy_setup.py -v
+bun test tests/cli-proxy-setup.test.ts
 ```
 
 ## Tmux plugins

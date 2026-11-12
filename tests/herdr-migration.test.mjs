@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test from "node:test";
+import { test } from "bun:test";
 import { prefixAction, stepIndex } from "../home/dot_config/herdr-app/mods/legacy-keys/bindings.js";
 
 const root = new URL("../home/dot_config/herdr-app/", import.meta.url);

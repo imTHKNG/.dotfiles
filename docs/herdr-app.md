@@ -75,7 +75,7 @@ Backups from migration are under
 ## Checks
 
 ```fish
-node --test tests/test_herdr_migration.mjs
+bun test tests/herdr-migration.test.mjs
 herdr-app check ~/.config/herdr-app/mods/legacy-keys
 herdr-app status
 ```
