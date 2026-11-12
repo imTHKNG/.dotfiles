@@ -53,6 +53,31 @@ This repo currently manages, among others:
 - `~/.local/bin/fuji-ingest`
 - `~/.local/bin/omarchy-webapp-install` / `web2app` helpers
 
+## Web app launchers
+
+`web2app` creates a Chromium app launcher in `~/.local/share/applications` and refreshes the KDE menu:
+
+```fish
+web2app WhatsApp web.whatsapp.com
+web2app WhatsApp https://web.whatsapp.com/ whatsapp
+web2app Example https://example.com/ ~/Pictures/example.png
+```
+
+The optional third argument is an icon URL, a local image file or an icon theme name. Without it, `web2app` tries the site's `apple-touch-icon`, then `/apple-touch-icon.png`, then Google's favicon service with the site host. Downloaded and copied icons go to `~/.local/share/icons/hicolor`.
+
+List or remove launchers created by `web2app`, including older Chromium `--app` launchers:
+
+```fish
+web2app-remove
+web2app-remove WhatsApp
+```
+
+Run the isolated tests with:
+
+```fish
+python3 -m unittest tests/test_web2app.py -v
+```
+
 ## Fujifilm photo ingestion
 
 `fuji-ingest` copies every file from one camera exposed through `gphoto2` into a new dated batch. It verifies names and reported sizes, then writes `SHA256SUMS`. It never deletes camera files.

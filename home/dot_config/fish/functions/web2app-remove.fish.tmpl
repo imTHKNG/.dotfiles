@@ -1,18 +1,71 @@
 {{- with index .machines .chezmoi.hostname }}
 {{- if .isDesktop }}
+function __web2app_remove_is_entry --argument-names file
+    string match -rq '^(X-Web2App=true|Exec=chromium .*--app=)' <$file
+end
+
+function __web2app_remove_icon --argument-names data_dir icon_path
+    test -n "$icon_path"; or return 0
+
+    for allowed_dir in $data_dir/icons/hicolor/256x256/apps $data_dir/icons/hicolor/scalable/apps $data_dir/applications/icons
+        if test (path dirname -- $icon_path) = $allowed_dir
+            rm -f -- $icon_path
+            return 0
+        end
+    end
+end
+
 function web2app-remove
-    if test (count $argv) -ne 1
-        echo "Usage: web2app-remove <AppName>"
+    if test (count $argv) -gt 1
+        echo "Usage: web2app-remove [AppName]" >&2
         return 1
     end
 
-    set APP_NAME $argv[1]
-    set ICON_DIR "$HOME/.local/share/applications/icons"
-    set DESKTOP_FILE "$HOME/.local/share/applications/$APP_NAME.desktop"
-    set ICON_PATH "$ICON_DIR/$APP_NAME.png"
+    set -l data_dir $HOME/.local/share
+    set -q XDG_DATA_HOME; and test -n "$XDG_DATA_HOME"; and set data_dir $XDG_DATA_HOME
+    set -l desktop_dir $data_dir/applications
 
-    rm "$DESKTOP_FILE"
-    rm "$ICON_PATH"
+    if test (count $argv) -eq 0
+        set -l apps
+
+        for file in $desktop_dir/*.desktop
+            __web2app_remove_is_entry $file; and set -a apps (path change-extension '' -- (path basename -- $file))
+        end
+
+        if test (count $apps) -eq 0
+            echo "No web apps to remove." >&2
+            return 1
+        end
+
+        printf '%s\n' $apps | sort
+        return 0
+    end
+
+    set -l app_name $argv[1]
+    if test -z "$app_name"; or string match -q '*/*' -- $app_name; or test "$app_name" = .; or test "$app_name" = ..
+        echo "Error: invalid app name." >&2
+        return 1
+    end
+
+    set -l desktop_file $desktop_dir/$app_name.desktop
+    if not test -f $desktop_file; or not __web2app_remove_is_entry $desktop_file
+        echo "Error: no web app named '$app_name'." >&2
+        return 1
+    end
+
+    set -l icon_path (string match -r '^X-Web2App-Icon=(.*)$' <$desktop_file)[2]
+    if test -z "$icon_path"
+        set icon_path (string match -r '^Icon=(/.*)$' <$desktop_file)[2]
+    end
+
+    rm -f -- $desktop_file
+    __web2app_remove_icon $data_dir (string replace -a '\\\\' '\\' -- $icon_path)
+
+    command -q update-desktop-database; and update-desktop-database $desktop_dir &>/dev/null
+    command -q gtk-update-icon-cache; and gtk-update-icon-cache -q -t $data_dir/icons/hicolor &>/dev/null
+    command -q kbuildsycoca6; and kbuildsycoca6 &>/dev/null
+
+    echo "Removed $app_name"
 end
 {{- end }}
 {{- end }}

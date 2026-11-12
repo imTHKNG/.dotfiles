@@ -1,36 +1,186 @@
 {{- with index .machines .chezmoi.hostname }}
 {{- if .isDesktop }}
+function __web2app_safe_name
+    string lower -- $argv[1] | string replace -ra '[^[:alnum:]]+' - | string trim -c -
+end
+
+function __web2app_exec_arg
+    set -l value $argv[1]
+
+    set value (string replace -a '\\' '\\\\' -- $value)
+    set value (string replace -a '"' '\\"' -- $value)
+    set value (string replace -a '`' '\\`' -- $value)
+    set value (string replace -a '$' '\\$' -- $value)
+    set value (string replace -a '%' '%%' -- $value)
+
+    printf '"%s"' $value
+end
+
+function __web2app_desktop_string
+    set -l value (string replace -a '\\' '\\\\' -- $argv[1])
+
+    string replace -r '^ ' '\\s' -- $value
+end
+
+function __web2app_window_class
+    set -l address (string replace -r '^[^:]+://' '' -- $argv[1])
+    set address (string replace -r '[?#].*$' '' -- $address)
+    set -l host (string replace -r '/.*$' '' -- $address)
+    set -l path (string sub -s (math (string length -- $host) + 1) -- $address)
+
+    set host (string replace -r '^.*@' '' -- $host)
+    set host (string replace -r ':.*$' '' -- $host | string lower)
+    test -n "$path"; or set path /
+
+    printf 'chrome-%s_%s-Default\n' $host $path | string replace -a / _
+end
+
+function __web2app_download_icon --argument-names url destination
+    if curl -fsSL --max-time 10 -o $destination $url 2>/dev/null
+        and test -s $destination
+        and string match -q 'image/*' -- (file -b --mime-type $destination)
+        return 0
+    end
+
+    rm -f $destination
+    return 1
+end
+
+function __web2app_fetch_site_icon --argument-names site_url destination
+    set -l origin (string match -r '^https?://[^/]+' -- $site_url)
+    set -l host (string replace -r '^https?://' '' -- $origin | string replace -r '^.*@' '' | string replace -r ':.*$' '')
+    set -l page (curl -fsSL --max-time 5 $site_url 2>/dev/null | head -c 100000 | string join ' ')
+    set -l link (string match -ri '<link[^>]*rel=["\'][^"\']*apple-touch-icon[^"\']*["\'][^>]*>' -- $page)[1]
+    set -l icon_url (string match -ri 'href=["\'][^"\']+' -- $link | string replace -ri '^href=["\']' '')
+
+    switch "$icon_url"
+        case 'http://*' 'https://*'
+        case '//*'
+            set icon_url "https:$icon_url"
+        case '/*'
+            set icon_url "$origin$icon_url"
+        case '?*'
+            set icon_url "$origin/$icon_url"
+    end
+
+    if test -n "$icon_url"; and __web2app_download_icon $icon_url $destination
+        return 0
+    end
+
+    __web2app_download_icon "$origin/apple-touch-icon.png" $destination
+    or __web2app_download_icon "https://www.google.com/s2/favicons?domain=$host&sz=256" $destination
+end
+
+function __web2app_refresh --argument-names data_dir
+    command -q update-desktop-database; and update-desktop-database $data_dir/applications &>/dev/null
+    command -q gtk-update-icon-cache; and gtk-update-icon-cache -q -t $data_dir/icons/hicolor &>/dev/null
+    command -q kbuildsycoca6; and kbuildsycoca6 &>/dev/null
+end
+
 function web2app
-    if test (count $argv) -ne 3
-        echo "Usage: web2app <AppName> <AppURL> <IconURL> (IconURL must be in PNG -- use https://dashboardicons.com)"
+    set -l usage "Usage: web2app <AppName> <AppURL> [IconURL|IconFile|IconName]"
+
+    if test (count $argv) -lt 2; or test (count $argv) -gt 3
+        echo $usage >&2
         return 1
     end
 
-    set APP_NAME $argv[1]
-    set APP_URL $argv[2]
-    set ICON_URL $argv[3]
-    set ICON_DIR "$HOME/.local/share/applications/icons"
-    set DESKTOP_FILE "$HOME/.local/share/applications/$APP_NAME.desktop"
-    set ICON_PATH "$ICON_DIR/$APP_NAME.png"
+    set -l app_name $argv[1]
+    set -l app_url $argv[2]
+    set -l icon_ref $argv[3]
 
-    mkdir -p "$ICON_DIR"
-
-    if not curl -sL -o "$ICON_PATH" "$ICON_URL"
-        echo "Error: Failed to download icon."
+    if test -z "$app_name"; or string match -q '*/*' -- $app_name; or string match -rq '[[:cntrl:]]' -- $app_name
+        echo "Error: app name must be non-empty and contain no '/' or control characters." >&2
         return 1
     end
 
-    echo "[Desktop Entry]
-Version=1.0
-Name=$APP_NAME
-Comment=$APP_NAME
-Exec=chromium --new-window --ozone-platform=wayland --app=\"$APP_URL\" --name=\"$APP_NAME\" --class=\"$APP_NAME\"
-Terminal=false
-Type=Application
-Icon=$ICON_PATH
-StartupNotify=true" > "$DESKTOP_FILE"
+    if test "$app_name" = .; or test "$app_name" = ..
+        echo "Error: invalid app name." >&2
+        return 1
+    end
 
-    chmod +x "$DESKTOP_FILE"
+    if not string match -rq '^[[:alpha:]][[:alnum:]+.-]*:' -- $app_url
+        set app_url "https://$app_url"
+    end
+
+    if string match -rq '[[:space:][:cntrl:]]' -- $app_url; or not string match -riq '^https?://[^/?#]+' -- $app_url
+        echo "Error: app URL must be http(s) and contain no whitespace." >&2
+        return 1
+    end
+
+    set -l data_dir $HOME/.local/share
+    set -q XDG_DATA_HOME; and test -n "$XDG_DATA_HOME"; and set data_dir $XDG_DATA_HOME
+    set -l desktop_dir $data_dir/applications
+    set -l desktop_file $desktop_dir/$app_name.desktop
+    set -l icon_name (__web2app_safe_name $app_name)
+    test -n "$icon_name"; or set icon_name web2app
+    set -l icon_value $icon_name
+    set -l installed_icon
+
+    mkdir -p $desktop_dir
+
+    if test -z "$icon_ref"; or string match -riq '^https?://' -- $icon_ref
+        set -l icon_dir $data_dir/icons/hicolor/256x256/apps
+        set installed_icon $icon_dir/$icon_name.png
+        mkdir -p $icon_dir
+
+        if test -z "$icon_ref"
+            __web2app_fetch_site_icon $app_url $installed_icon
+        else
+            __web2app_download_icon $icon_ref $installed_icon
+        end
+        or begin
+            echo "Error: failed to download a valid icon." >&2
+            return 1
+        end
+    else if test -f "$icon_ref"
+        if not string match -q 'image/*' -- (file -b --mime-type $icon_ref)
+            echo "Error: icon file is not an image." >&2
+            return 1
+        end
+
+        set -l extension (string match -r '\.([[:alnum:]]+)$' -- $icon_ref)[2]
+        set extension (string lower -- $extension)
+        test -n "$extension"; or set extension png
+        set -l icon_dir $data_dir/icons/hicolor/256x256/apps
+        test "$extension" = svg; and set icon_dir $data_dir/icons/hicolor/scalable/apps
+        set installed_icon $icon_dir/$icon_name.$extension
+
+        mkdir -p $icon_dir
+        cp -- $icon_ref $installed_icon; or return 1
+    else
+        if string match -rq '[[:cntrl:]]' -- $icon_ref
+            echo "Error: invalid icon name." >&2
+            return 1
+        end
+
+        set icon_value $icon_ref
+    end
+
+    set -l exec_command (string join -- ' ' chromium --new-window \
+        (__web2app_exec_arg "--app=$app_url") \
+        (__web2app_exec_arg "--name=$app_name") \
+        (__web2app_exec_arg "--class=$app_name"))
+    set -l name_field (__web2app_desktop_string $app_name)
+    set -l lines \
+        '[Desktop Entry]' \
+        'Version=1.0' \
+        "Name=$name_field" \
+        "Comment=Web app for $name_field" \
+        "Exec="(__web2app_desktop_string $exec_command) \
+        'Terminal=false' \
+        'Type=Application' \
+        "Icon="(__web2app_desktop_string $icon_value) \
+        'StartupNotify=true' \
+        "StartupWMClass="(__web2app_window_class $app_url) \
+        'X-Web2App=true'
+    test -n "$installed_icon"; and set -a lines "X-Web2App-Icon="(__web2app_desktop_string $installed_icon)
+
+    printf '%s\n' $lines >$desktop_file; or return 1
+    chmod +x $desktop_file
+    __web2app_refresh $data_dir
+
+    echo "Created $desktop_file"
 end
 {{- end }}
 {{- end }}
