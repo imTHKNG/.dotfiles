@@ -92,6 +92,8 @@ bun test tests/web2app.test.ts
 
 `fuji-ingest` copies every file from one camera exposed through `gphoto2` into a new dated batch. It verifies names and reported sizes, then writes `SHA256SUMS`. It never deletes camera files.
 
+It needs `gphoto2` (the Arch package of the same name) and `bun` on `PATH`; the mise config installs Bun. The script is Bun TypeScript and uses only Bun and Node built-in modules. Its source keeps the name `executable_fuji-ingest` without a `.ts` extension, because Bun runs it through the `#!/usr/bin/env bun` shebang. A batch started by the earlier Python version can be resumed by this one, and the reverse also works.
+
 Preview an ingest:
 
 ```bash
@@ -111,6 +113,14 @@ fuji-ingest --resume fuji-baseline
 ```
 
 Use `--date YYYY-MM-DD` when resuming on a later day or assigning a different ingestion date. An incomplete batch created under the old `imported/` layout can still be resumed there. `fuji-ingest` verifies the local copy but does not create a second copy. Formatting the card before a verified backup leaves the computer as the only copy.
+
+Ctrl+C stops `gphoto2`, keeps the partial batch and exits with code 130.
+
+The tests replace `gphoto2` with a shell script and leave `/usr/bin` off `PATH`, so they never reach a real camera:
+
+```fish
+bun test tests/fuji-ingest.test.ts
+```
 
 ## CLIProxyAPI and Claude Pro in Pi
 
