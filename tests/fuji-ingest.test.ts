@@ -63,11 +63,18 @@ case " $* " in
   if [ -n "\${FAKE_HANG:-}" ]; then
     trap 'echo TERM >>"$state/signal"; kill "$child" 2>/dev/null; exit 143' TERM
     trap 'echo INT >>"$state/signal"; kill "$child" 2>/dev/null; exit 130' INT
+    if [ -n "\${FAKE_IGNORE_TERM:-}" ]; then
+      trap 'echo TERM ignored >>"$state/signal"' TERM
+    fi
     sleep 60 &
     child=$!
+    echo "$child" >"$state/sleep-pid"
     echo "$$" >"$state/pid"
-    wait "$child"
-    echo "finished without a signal" >"$state/signal"
+    # A trapped signal interrupts wait; keep waiting while sleep runs.
+    while kill -0 "$child" 2>/dev/null; do
+      wait "$child"
+    done
+    echo "finished without a signal" >>"$state/signal"
     exit 0
   fi
   count=0
@@ -339,6 +346,9 @@ test("argument errors print usage and exit 2 without calling gphoto2", async () 
     [["--date=2026-02-31", "--root"], "argument --root: expected one argument"],
     [["--dry-run=yes", "a"], "argument --dry-run: ignored explicit argument 'yes'"],
     [["-h=x"], "argument -h/--help: ignored explicit argument 'x'"],
+    // A leading "--" makes everything after it positional.
+    [["--", "a", "--resume"], "unrecognized arguments: --resume"],
+    [["--", "--", "a"], "unrecognized arguments: a"],
   ];
 
   for (const [args, message] of cases) {
@@ -391,16 +401,17 @@ test("ISO 8601 date variants name the batch with the calendar date", async () =>
   }
 });
 
-test("the date defaults to today", async () => {
-  const now = new Date();
-  const today = [now.getFullYear(), now.getMonth() + 1, now.getDate()]
-    .map(part => String(part).padStart(2, "0"))
-    .join("-");
+test("the date defaults to today in the local time zone", async () => {
+  // bun test runs in UTC; a zone 14 hours ahead shows that local time is used.
+  const timeZone = "Pacific/Kiritimati";
+  const today = () => new Intl.DateTimeFormat("en-CA", { timeZone }).format(new Date());
+  const before = today();
 
-  const result = await invoke(["--root", root, "--dry-run", slug]);
+  const result = await invoke(["--root", root, "--dry-run", slug], { TZ: timeZone });
 
+  const destinations = [before, today()].map(day => `${root}/${day.slice(0, 4)}/${day}-${slug}`);
   expect(result.exitCode, result.stderr).toBe(0);
-  expect(result.stdout).toContain(`${root}/${today.slice(0, 4)}/${today}-${slug}\n`);
+  expect(destinations).toContain(result.stdout.match(/^Imported destination: (.*)$/m)![1]!);
 });
 
 // What a terminal would show: each carriage return rewrites the current line.
@@ -875,9 +886,9 @@ function alive(pid: number): boolean {
 
 // Ctrl+C in a terminal signals the whole foreground process group; `group` reproduces
 // that, otherwise only fuji-ingest receives SIGINT and must stop gphoto2 itself.
-async function interruptDownload(group: boolean) {
+async function interruptDownload(group: boolean, env: Record<string, string> = {}) {
   const child = spawn(command[0]!, [...command.slice(1), "--root", root, "--date", date, slug], {
-    env: environment({ FAKE_HANG: "1" }),
+    env: environment({ FAKE_HANG: "1", ...env }),
     detached: group,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -894,7 +905,9 @@ async function interruptDownload(group: boolean) {
 
     return { exitCode, stdout, stderr, gphoto2, signal: readFileSync(join(state, "signal"), "utf8") };
   } finally {
-    if (alive(gphoto2)) process.kill(gphoto2, "SIGKILL");
+    for (const pid of [gphoto2, Number(readFileSync(join(state, "sleep-pid"), "utf8"))]) {
+      if (alive(pid)) process.kill(pid, "SIGKILL");
+    }
   }
 }
 
@@ -917,3 +930,43 @@ for (const group of [false, true]) {
     expect(manifest().status).toBe("incomplete");
   });
 }
+
+test("sizes are rounded half to even like Python", async () => {
+  camera([{ name: "DSCF0001.RAF", kib: 1280 }]);
+  const quarter = await ingest(["--dry-run"]);
+  camera([{ name: "DSCF0001.RAF", kib: 1792 }]);
+  const threeQuarters = await ingest(["--dry-run"]);
+
+  expect(quarter.stdout).toContain("Camera files: 1 (1.2 MiB)\n");
+  expect(threeQuarters.stdout).toContain("Camera files: 1 (1.8 MiB)\n");
+});
+
+test("--root expands ~ and resolves symlinks before ..", async () => {
+  const deep = join(temporary.path, "deep/inside");
+  mkdirSync(deep, { recursive: true });
+  symlinkSync(deep, join(temporary.path, "link"));
+
+  const tilde = await invoke(["--root=~/photography", "--date", date, "--dry-run", slug]);
+  const linked = await run([...command, "--root", "link/../photos", "--date", date, "--dry-run", slug], {
+    cwd: temporary.path,
+    env: environment(),
+  });
+
+  expect(tilde.stdout).toContain(`Imported destination: ${batch}\n`);
+  expect(linked.exitCode, linked.stderr).toBe(0);
+  expect(linked.stdout).toContain(`Imported destination: ${temporary.path}/deep/photos/2026/${date}-${slug}\n`);
+});
+
+test("Ctrl+C kills gphoto2 when it ignores SIGTERM for 5 seconds", async () => {
+  camera(jpegs(3));
+  const started = Date.now();
+
+  const result = await interruptDownload(false, { FAKE_IGNORE_TERM: "1" });
+
+  expect(result.exitCode).toBe(130);
+  expect(result.stderr).toBe(`\n${interrupted}\n`);
+  expect(result.signal).toBe("TERM ignored\n");
+  expect(alive(result.gphoto2)).toBe(false);
+  expect(Date.now() - started).toBeGreaterThanOrEqual(5000);
+  expect(manifest().status).toBe("incomplete");
+}, 15_000);
