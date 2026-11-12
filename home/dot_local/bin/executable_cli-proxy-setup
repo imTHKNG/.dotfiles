@@ -1,140 +1,764 @@
-#!/usr/bin/env python3
-"""Prepare machine-local CLIProxyAPI files without logging in or starting services."""
+#!/usr/bin/env bun
+// Prepare machine-local CLIProxyAPI files without logging in or starting services.
+//
+// This script replaced a Python version and keeps its observable behavior:
+// argparse help and errors, pathlib path strings, and the json.loads /
+// json.dumps(indent=2) format of ~/.pi/agent/models.json. JSON.parse and
+// JSON.stringify would reorder numeric keys, write raw non-ASCII characters,
+// turn 1.0 into 1, round large integers and reject NaN, so the JSON helpers
+// below follow Python instead.
 
-import argparse
-import json
-import os
-from pathlib import Path
-import re
-import secrets
-import stat
-import sys
-import tempfile
+import { randomBytes, randomInt } from "node:crypto";
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+  type Stats,
+} from "node:fs";
+import { userInfo } from "node:os";
+import { basename, dirname } from "node:path";
+import { isatty } from "node:tty";
 
+const PROVIDER = "claude-pro-proxy";
+const DESCRIPTION = "Prepare machine-local CLIProxyAPI files without logging in or starting services.";
+const HELP_HELP = "show this help message and exit";
+const REFRESH_HELP = "Re-render the native config, backing up the previous file and retaining the local key.";
 
-PROVIDER = "claude-pro-proxy"
+class SetupError extends Error {}
 
+// Paths
 
-class SetupError(Exception):
-    pass
+// Same string as str(pathlib.Path(*segments)): drops empty and "." parts,
+// keeps "..", and keeps a leading "//".
+function path(...segments: string[]): string {
+  let joined = "";
+  for (const segment of segments) joined = segment.startsWith("/") || joined === "" ? segment : `${joined}/${segment}`;
 
+  const root = /^\/\/(?!\/)/.test(joined) ? "//" : joined.startsWith("/") ? "/" : "";
+  const parts = joined.split("/").filter(part => part !== "" && part !== ".");
 
-def regular_file(path):
-    if path.is_symlink() or (path.exists() and not path.is_file()):
-        raise SetupError(f"Expected a regular file, not a symlink: {path}")
+  return root + parts.join("/") || ".";
+}
 
+// Path.home(): HOME when set, even if empty, otherwise the passwd entry.
+function home(): string {
+  const directory = process.env.HOME ?? userInfo().homedir;
 
-def private_directory(path):
-    if path.is_symlink() or (path.exists() and not path.is_dir()):
-        raise SetupError(f"Expected a directory, not a symlink: {path}")
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path.chmod(0o700)
+  return path(directory.replace(/\/+$/, "") || "/");
+}
 
+// Files
 
-def write_private(path, content):
-    """Replace a file atomically; sensitive temporary files are always mode 0600."""
-    regular_file(path)
-    fd, temp = tempfile.mkstemp(prefix=".cli-proxy-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w") as stream:
-            stream.write(content)
-        os.replace(temp, path)
-    finally:
-        if os.path.exists(temp):
-            os.unlink(temp)
+// pathlib treats any stat error as "does not exist".
+function entry(file: string): Stats | undefined {
+  try {
+    return lstatSync(file);
+  } catch {
+    return undefined;
+  }
+}
 
+function requireRegularFile(file: string): void {
+  const stats = entry(file);
+  if (stats && !stats.isFile()) throw new SetupError("Expected a regular file, not a symlink.");
+}
 
-def backup(path, root):
-    directory = root / "backups"
-    private_directory(directory)
-    fd, destination = tempfile.mkstemp(prefix=path.name + ".", dir=directory)
-    with os.fdopen(fd, "wb") as stream:
-        stream.write(path.read_bytes())
+function requireDirectory(file: string): void {
+  const stats = entry(file);
+  if (stats && !stats.isDirectory()) throw new SetupError("Expected a directory, not a symlink.");
+}
 
+// Path.mkdir(mode, parents=True, exist_ok=True): missing parents get the
+// default mode, only the last directory gets `mode`.
+function makeDirectory(directory: string, mode: number): void {
+  try {
+    mkdirSync(directory, { mode });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" && dirname(directory) !== directory) {
+      makeDirectory(dirname(directory), 0o777);
+      makeDirectory(directory, mode);
+      return;
+    }
 
-def prepare(home, managed, refresh):
-    root = home / ".local/share/cliproxyapi-opus-test"
-    key_path = root / "proxy-key"
-    config_path = root / "config.native.yaml"
-    auth = root / "auth-native"
-    models_path = home / ".pi/agent/models.json"
+    if (!entry(directory)?.isDirectory()) throw error;
+  }
+}
 
-    # Check conflicts before creating any machine-local state.
-    for path in (key_path, config_path, models_path):
-        regular_file(path)
-    for path in (root, auth):
-        if path.is_symlink() or (path.exists() and not path.is_dir()):
-            raise SetupError(f"Expected a directory, not a symlink: {path}")
+function privateDirectory(directory: string): void {
+  requireDirectory(directory);
 
-    provider = json.loads((managed / "pi-provider.json").read_text())
-    models = json.loads(models_path.read_text()) if models_path.exists() else {}
-    if not isinstance(models, dict) or not isinstance(models.get("providers", {}), dict):
-        raise SetupError("Pi models.json must contain a providers object.")
-    existing = models.get("providers", {}).get(PROVIDER)
-    if existing is not None and existing != provider:
-        raise SetupError("Pi already has a different claude-pro-proxy provider; left unchanged.")
+  makeDirectory(directory, 0o700);
+  chmodSync(directory, 0o700);
+}
 
-    template = (managed / "config.template.yaml").read_text()
-    for marker in ('"__LOCAL_PROXY_KEY__"', '"__AUTH_DIR__"'):
-        if template.count(marker) != 1:
-            raise SetupError("The managed config template has invalid placeholders.")
+// tempfile.mkstemp(): an exclusive new file with mode 0600.
+function createTemporary(directory: string, prefix: string): { fd: number; file: string } {
+  const characters = "abcdefghijklmnopqrstuvwxyz0123456789_";
+  const flags = constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
 
-    if key_path.exists():
-        if key_path.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO):
-            raise SetupError("The local proxy key must be private; expected mode 0600.")
-        key = key_path.read_text().strip()
-        if not re.fullmatch(r"[0-9a-f]{64}", key):
-            raise SetupError("The existing local proxy key has an unexpected format.")
-    elif config_path.exists():
-        raise SetupError("Config exists without its local key; refusing to generate a different key.")
-    else:
-        key = secrets.token_hex(32)
+  for (let attempt = 0; attempt < 10000; attempt += 1) {
+    let name = prefix;
+    for (let index = 0; index < 8; index += 1) name += characters[randomInt(characters.length)];
+    const file = path(directory, name);
 
-    private_directory(root)
-    private_directory(auth)
-    if not key_path.exists():
-        write_private(key_path, key + "\n")
+    try {
+      return { fd: openSync(file, flags, 0o600), file };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  }
 
-    rendered = template.replace('"__LOCAL_PROXY_KEY__"', json.dumps(key))
-    rendered = rendered.replace('"__AUTH_DIR__"', json.dumps(str(auth)))
-    if not config_path.exists():
-        write_private(config_path, rendered)
-    elif refresh:
-        if config_path.read_text() != rendered:
-            backup(config_path, root)
-            write_private(config_path, rendered)
-    else:
-        print("Existing native config preserved. Use --refresh-config to render the managed template.")
+  throw new SetupError("No usable temporary name.");
+}
 
-    if existing is None:
-        if models_path.exists():
-            backup(models_path, root)
-        models.setdefault("providers", {})[PROVIDER] = provider
-        models_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        write_private(models_path, json.dumps(models, indent=2) + "\n")
+// Replace a file atomically; sensitive temporary files are always mode 0600.
+function writePrivate(file: string, content: string): void {
+  requireRegularFile(file);
 
-    print("Local proxy config and Pi provider ready. OAuth credentials were not copied or changed.")
-    print("No service started. Log in locally, then enable cli-proxy-api.service.")
+  const { fd, file: temporary } = createTemporary(dirname(file), ".cli-proxy-");
+  try {
+    try {
+      writeFileSync(fd, content);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(temporary, file);
+  } finally {
+    if (existsSync(temporary)) unlinkSync(temporary);
+  }
+}
 
+function backup(file: string, root: string): void {
+  const directory = path(root, "backups");
+  privateDirectory(directory);
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--refresh-config", action="store_true",
-        help="Re-render the native config, backing up the previous file and retaining the local key.",
-    )
-    args = parser.parse_args()
-    home = Path.home()
-    managed = Path(os.environ.get("XDG_CONFIG_HOME", str(home / ".config"))) / "cli-proxy-api"
-    try:
-        prepare(home, managed, args.refresh_config)
-    except (SetupError, OSError, ValueError):
-        # Do not print exception payloads: they may contain file contents or credentials.
-        print("cli-proxy-setup: preparation failed; existing credentials were not replaced.", file=sys.stderr)
-        print("Check file types, private key permissions, JSON, template placeholders and provider conflicts.", file=sys.stderr)
-        return 1
-    return 0
+  const { fd } = createTemporary(directory, `${basename(file)}.`);
+  try {
+    writeFileSync(fd, readFileSync(file));
+  } finally {
+    closeSync(fd);
+  }
+}
 
+// Path.read_text(): strict UTF-8 that keeps a BOM, with universal newlines.
+function readText(file: string): string {
+  const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(readFileSync(file));
 
-if __name__ == "__main__":
-    sys.exit(main())
+  return text.replace(/\r\n?/g, "\n");
+}
+
+// str.strip() uses Python's whitespace set, which differs from String.trim().
+function pythonStrip(text: string): string {
+  const space = "[\\t\\n\\x0b\\x0c\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]";
+
+  return text.replace(new RegExp(`^${space}+|${space}+$`, "g"), "");
+}
+
+// JSON with Python semantics: bigint is a Python int, number a Python float,
+// Map a dict that keeps insertion order for every key.
+
+type PyValue = null | boolean | string | bigint | number | PyValue[] | PyDict;
+type PyDict = Map<string, PyValue>;
+
+const JSON_NUMBER = /(-?(?:0|[1-9][0-9]*))(\.[0-9]+)?([eE][-+]?[0-9]+)?/y;
+const JSON_PLAIN = /[^"\\\x00-\x1f]*/y;
+const JSON_LITERALS: [string, PyValue][] = [
+  ["null", null],
+  ["true", true],
+  ["false", false],
+  ["NaN", NaN],
+  ["Infinity", Infinity],
+  ["-Infinity", -Infinity],
+];
+const JSON_UNESCAPES: Record<string, string> = {
+  '"': '"',
+  "\\": "\\",
+  "/": "/",
+  b: "\b",
+  f: "\f",
+  n: "\n",
+  r: "\r",
+  t: "\t",
+};
+const JSON_ESCAPES: Record<string, string> = {
+  '"': '\\"',
+  "\\": "\\\\",
+  "\n": "\\n",
+  "\r": "\\r",
+  "\t": "\\t",
+  "\b": "\\b",
+  "\f": "\\f",
+};
+
+// json.loads()
+function parseJson(text: string): PyValue {
+  let index = 0;
+
+  const fail = (): never => {
+    throw new SetupError("Invalid JSON.");
+  };
+  const skipWhitespace = () => {
+    while (index < text.length && " \t\n\r".includes(text[index])) index += 1;
+  };
+
+  function parseString(): string {
+    let result = "";
+    index += 1;
+
+    while (true) {
+      JSON_PLAIN.lastIndex = index;
+      JSON_PLAIN.exec(text);
+      result += text.slice(index, JSON_PLAIN.lastIndex);
+      index = JSON_PLAIN.lastIndex;
+
+      if (text[index] === '"') {
+        index += 1;
+        return result;
+      }
+      if (text[index] !== "\\") fail();
+
+      const escape = text[index + 1] ?? "";
+      if (escape === "u") {
+        const hex = text.slice(index + 2, index + 6);
+        if (!/^[0-9a-fA-F]{4}$/.test(hex)) fail();
+        result += String.fromCharCode(parseInt(hex, 16));
+        index += 6;
+      } else {
+        if (!Object.hasOwn(JSON_UNESCAPES, escape)) fail();
+        result += JSON_UNESCAPES[escape];
+        index += 2;
+      }
+    }
+  }
+
+  function parseContainer<T>(close: string, item: () => T): T[] {
+    const items: T[] = [];
+    index += 1;
+    skipWhitespace();
+
+    if (text[index] === close) {
+      index += 1;
+      return items;
+    }
+
+    while (true) {
+      items.push(item());
+      skipWhitespace();
+
+      if (text[index] === close) {
+        index += 1;
+        return items;
+      }
+      if (text[index] !== ",") fail();
+      index += 1;
+      skipWhitespace();
+    }
+  }
+
+  function parseValue(): PyValue {
+    const char = text[index];
+
+    if (char === '"') return parseString();
+    if (char === "[") return parseContainer("]", parseValue);
+    if (char === "{") {
+      return new Map(
+        parseContainer("}", () => {
+          if (text[index] !== '"') fail();
+          const key = parseString();
+          skipWhitespace();
+          if (text[index] !== ":") fail();
+          index += 1;
+          skipWhitespace();
+
+          return [key, parseValue()] as const;
+        }),
+      );
+    }
+
+    JSON_NUMBER.lastIndex = index;
+    const number = JSON_NUMBER.exec(text);
+    if (number) {
+      index = JSON_NUMBER.lastIndex;
+      if (number[2] || number[3]) return Number(number[0]);
+      // Python refuses to convert integers longer than 4300 digits.
+      if (number[1].replace("-", "").length > 4300) fail();
+
+      return BigInt(number[1]);
+    }
+
+    for (const [word, value] of JSON_LITERALS) {
+      if (text.startsWith(word, index)) {
+        index += word.length;
+        return value;
+      }
+    }
+
+    return fail();
+  }
+
+  skipWhitespace();
+  const value = parseValue();
+  skipWhitespace();
+  if (index !== text.length) fail();
+
+  return value;
+}
+
+// json.dumps(ensure_ascii=True) for one string: escapes every UTF-16 unit
+// outside printable ASCII, so astral characters become surrogate pairs.
+function quoteJson(text: string): string {
+  const escaped = text.replace(
+    /["\\]|[^ -~]/g,
+    char => JSON_ESCAPES[char] ?? `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+
+  return `"${escaped}"`;
+}
+
+// float.__repr__(), plus the NaN and Infinity spellings of json.dumps.
+function floatRepr(value: number): string {
+  if (Number.isNaN(value)) return "NaN";
+  if (value === Infinity) return "Infinity";
+  if (value === -Infinity) return "-Infinity";
+
+  const sign = value < 0 || Object.is(value, -0) ? "-" : "";
+  const [mantissa, exponent] = Math.abs(value).toExponential().split("e");
+  const digits = mantissa.replace(".", "");
+  const point = Number(exponent) + 1;
+
+  if (point > -4 && point <= 16) {
+    if (point <= 0) return `${sign}0.${"0".repeat(-point)}${digits}`;
+    if (point >= digits.length) return `${sign}${digits}${"0".repeat(point - digits.length)}.0`;
+    return `${sign}${digits.slice(0, point)}.${digits.slice(point)}`;
+  }
+
+  const fraction = digits.length > 1 ? `.${digits.slice(1)}` : "";
+  const power = point - 1;
+
+  return `${sign}${digits[0]}${fraction}e${power < 0 ? "-" : "+"}${String(Math.abs(power)).padStart(2, "0")}`;
+}
+
+// json.dumps(value, indent=2)
+function dumpJson(value: PyValue, level = 0): string {
+  if (value === null) return "null";
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "string") return quoteJson(value);
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "number") return floatRepr(value);
+
+  const list = Array.isArray(value);
+  const items = list
+    ? value.map(item => dumpJson(item, level + 1))
+    : [...value].map(([key, item]) => `${quoteJson(key)}: ${dumpJson(item, level + 1)}`);
+  const [open, close] = list ? ["[", "]"] : ["{", "}"];
+  if (items.length === 0) return open + close;
+
+  const inner = `\n${"  ".repeat(level + 1)}`;
+  const outer = `\n${"  ".repeat(level)}`;
+
+  return open + inner + items.join(`,${inner}`) + outer + close;
+}
+
+// Python ==: dict order does not matter, and True == 1 == 1.0.
+function pythonEqual(left: PyValue, right: PyValue): boolean {
+  const numeric = (value: PyValue) => ["boolean", "bigint", "number"].includes(typeof value);
+
+  if (numeric(left) && numeric(right)) {
+    const exact = (value: PyValue) => (typeof value === "boolean" ? BigInt(value) : value) as bigint | number;
+    const [a, b] = [exact(left), exact(right)];
+    if (typeof a === typeof b) return a === b;
+
+    const [float, integer] = (typeof a === "number" ? [a, b] : [b, a]) as [number, bigint];
+    return Number.isInteger(float) && BigInt(float) === integer;
+  }
+
+  if (Array.isArray(left)) {
+    return Array.isArray(right) && left.length === right.length && left.every((item, index) => pythonEqual(item, right[index]));
+  }
+
+  if (left instanceof Map) {
+    return (
+      right instanceof Map &&
+      left.size === right.size &&
+      [...left].every(([key, item]) => right.has(key) && pythonEqual(item, right.get(key) as PyValue))
+    );
+  }
+
+  return left === right;
+}
+
+// Command line, matching Python 3.14 argparse output for this parser
+
+type Option = "help" | "refresh";
+type Token =
+  | { kind: "extra"; text: string }
+  | { kind: "ambiguous"; message: string }
+  | { kind: "option"; option: Option; optionString: string; separator?: string; explicit?: string };
+
+const OPTION_STRINGS: [string, Option][] = [
+  ["-h", "help"],
+  ["--help", "help"],
+  ["--refresh-config", "refresh"],
+];
+const OPTION_NAMES: Record<Option, string> = { help: "-h/--help", refresh: "--refresh-config" };
+
+class UsageError extends Error {}
+
+const lookup = (optionString: string) => OPTION_STRINGS.find(([name]) => name === optionString)?.[1];
+
+// _parse_optional(): exact names, "--name=value", abbreviations and "-hX".
+function classify(argument: string): Token {
+  const option = (optionString: string, separator?: string, explicit?: string): Token => ({
+    kind: "option",
+    option: lookup(optionString) as Option,
+    optionString,
+    separator,
+    explicit,
+  });
+
+  if (!argument.startsWith("-") || argument.length === 1) return { kind: "extra", text: argument };
+  if (lookup(argument)) return option(argument);
+
+  const equals = argument.indexOf("=");
+  const [name, value] = equals === -1 ? [argument, undefined] : [argument.slice(0, equals), argument.slice(equals + 1)];
+  if (value !== undefined && lookup(name)) return option(name, "=", value);
+
+  // _get_option_tuples()
+  const matches: string[] = [];
+  const tokens: Token[] = [];
+  for (const [optionString] of OPTION_STRINGS) {
+    if (argument[1] !== "-" && optionString === argument.slice(0, 2)) {
+      tokens.push(option(optionString, "", argument.slice(2)));
+      matches.push(optionString);
+    } else if (optionString.startsWith(name)) {
+      tokens.push(option(optionString, value === undefined ? undefined : "=", value));
+      matches.push(optionString);
+    }
+  }
+
+  // argparse reports this only when it reaches the argument.
+  if (matches.length > 1) {
+    return { kind: "ambiguous", message: `ambiguous option: ${argument} could match ${matches.join(", ")}` };
+  }
+
+  return tokens[0] ?? { kind: "extra", text: argument };
+}
+
+// repr() of a str, used by "ignored explicit argument".
+function pythonRepr(text: string): string {
+  const quote = text.includes("'") && !text.includes('"') ? '"' : "'";
+  const escapes: Record<string, string> = { [quote]: `\\${quote}`, "\\": "\\\\", "\t": "\\t", "\n": "\\n", "\r": "\\r" };
+  let result = quote;
+
+  for (const char of text) {
+    const code = char.codePointAt(0) as number;
+    const printable = (code >= 0x20 && code < 0x7f) || (code > 0xa0 && !/[\p{C}\p{Z}]/u.test(char));
+
+    if (escapes[char]) result += escapes[char];
+    else if (printable) result += char;
+    else if (code <= 0xff) result += `\\x${code.toString(16).padStart(2, "0")}`;
+    else if (code <= 0xffff) result += `\\u${code.toString(16).padStart(4, "0")}`;
+    else result += `\\U${code.toString(16).padStart(8, "0")}`;
+  }
+
+  return result + quote;
+}
+
+// Returns whether --refresh-config was given, or "help".
+function parseArguments(argv: string[]): boolean | "help" {
+  const separator = argv.indexOf("--");
+  const options = separator === -1 ? argv : argv.slice(0, separator);
+  const tokens = options.map(classify);
+  const extras: string[] = [];
+  let refresh = false;
+
+  for (const token of tokens) {
+    if (token.kind === "ambiguous") throw new UsageError(token.message);
+    if (token.kind === "extra") {
+      extras.push(token.text);
+      continue;
+    }
+
+    let { option, optionString, separator, explicit } = token;
+    const actions: Option[] = [];
+
+    // consume_optional(): "-hh" repeats -h, "-hX" leaves "-X" unrecognized.
+    while (true) {
+      if (explicit === undefined) {
+        actions.push(option);
+        break;
+      }
+
+      if (optionString[1] === "-" || explicit === "" || separator || explicit[0] === "-") {
+        throw new UsageError(`argument ${OPTION_NAMES[option]}: ignored explicit argument ${pythonRepr(explicit)}`);
+      }
+
+      actions.push(option);
+      optionString = `-${explicit[0]}`;
+      const next = lookup(optionString);
+      if (!next) {
+        extras.push(`-${explicit}`);
+        break;
+      }
+
+      option = next;
+      explicit = explicit.slice(1);
+      if (explicit === "") [separator, explicit] = [undefined, undefined];
+      else if (explicit[0] === "=") [separator, explicit] = ["=", explicit.slice(1)];
+      else separator = "";
+    }
+
+    if (actions.includes("help")) return "help";
+    refresh = true;
+  }
+
+  if (separator !== -1) extras.push(...argv.slice(separator));
+  if (extras.length > 0) throw new UsageError(`unrecognized arguments: ${extras.join(" ")}`);
+
+  return refresh;
+}
+
+// shutil.get_terminal_size().columns - 2
+function helpWidth(): number {
+  const value = pythonStrip(process.env.COLUMNS ?? "");
+  const columns = /^[+-]?\d+(?:_\d+)*$/.test(value) ? Number(value.replaceAll("_", "")) : 0;
+
+  return (columns > 0 ? columns : (isatty(1) && process.stdout.columns) || 80) - 2;
+}
+
+// Python 3.14 colors argparse output when stdout is a terminal, whichever
+// stream receives the text.
+function painter(): (code: string, text: string) => string {
+  const color = !process.env.NO_COLOR && (Boolean(process.env.FORCE_COLOR) || (process.env.TERM !== "dumb" && isatty(1)));
+
+  return color ? (code, text) => `\x1b[${code}m${text}\x1b[0m` : (_code, text) => text;
+}
+
+const plainLength = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "").length;
+
+// textwrap.wrap() for the fixed help texts.
+function wrap(text: string, width: number): string[] {
+  const chunks = text
+    .split(/( )/)
+    .flatMap(word => word.split(/(?<=\p{L}{2}-)(?=\p{L})/u))
+    .filter(Boolean);
+  const lines: string[] = [];
+  let index = 0;
+
+  while (index < chunks.length) {
+    if (lines.length > 0 && chunks[index] === " ") index += 1;
+
+    let line = "";
+    while (index < chunks.length && line.length + chunks[index].length <= width) line += chunks[index++];
+    if (index < chunks.length && chunks[index].length > width) {
+      const room = Math.max(width - line.length, 1);
+      line += chunks[index].slice(0, room);
+      chunks[index] = chunks[index].slice(room);
+    }
+
+    line = line.replace(/ $/, "");
+    if (line) lines.push(line);
+  }
+
+  return lines;
+}
+
+function formatUsage(prog: string, width: number, paint: ReturnType<typeof painter>): string {
+  const prefix = "usage: ";
+  const parts = [`[${paint("32", "-h")}]`, `[${paint("36", "--refresh-config")}]`];
+
+  // get_lines() from HelpFormatter._format_usage
+  const lines = (items: string[], indent: string, first?: string) => {
+    const result: string[] = [];
+    let line: string[] = [];
+    let length = (first ?? indent).length - 1;
+
+    for (const item of items) {
+      if (length + 1 + plainLength(item) > width && line.length > 0) {
+        result.push(indent + line.join(" "));
+        line = [];
+        length = indent.length - 1;
+      }
+      line.push(item);
+      length += plainLength(item) + 1;
+    }
+    if (line.length > 0) result.push(indent + line.join(" "));
+    if (first !== undefined) result[0] = result[0].slice(indent.length);
+
+    return result;
+  };
+
+  let usage = [prog, ...parts].join(" ");
+  if (prefix.length + plainLength(usage) > width) {
+    const wrapped =
+      prefix.length + prog.length <= 0.75 * width
+        ? lines([prog, ...parts], " ".repeat(prefix.length + prog.length + 1), prefix)
+        : [prog, ...lines(parts, " ".repeat(prefix.length))];
+    usage = wrapped.join("\n");
+  }
+
+  return `${paint("1;34", prefix)}${paint("1;35", prog)}${usage.slice(prog.length)}`;
+}
+
+function formatHelp(prog: string, width: number, paint: ReturnType<typeof painter>): string {
+  const actions = [
+    { header: `${paint("1;32", "-h")}, ${paint("1;36", "--help")}`, help: HELP_HELP },
+    { header: paint("1;36", "--refresh-config"), help: REFRESH_HELP },
+  ];
+  const longest = Math.max(...actions.map(action => plainLength(action.header))) + 2;
+  const helpPosition = Math.min(longest + 2, Math.min(24, Math.max(width - 20, 4)));
+  const actionWidth = helpPosition - 4;
+
+  const items = actions.map(({ header, help }) => {
+    const fits = plainLength(header) <= actionWidth;
+    const [first, ...rest] = wrap(help, Math.max(width - helpPosition, 11));
+    const head = fits ? `  ${header}${" ".repeat(actionWidth - plainLength(header))}  ` : `  ${header}\n`;
+    const tail = rest.map(line => `${" ".repeat(helpPosition)}${line}\n`).join("");
+
+    return `${head}${" ".repeat(fits ? 0 : helpPosition)}${first}\n${tail}`;
+  });
+  const help = [
+    `${formatUsage(prog, width, paint)}\n\n`,
+    `${wrap(DESCRIPTION, Math.max(width, 11)).join("\n")}\n\n`,
+    `\n${paint("1;34", "options:")}\n${items.join("")}\n`,
+  ].join("");
+
+  return `${help.replace(/\n\n\n+/g, "\n\n").replace(/^\n+|\n+$/g, "")}\n`;
+}
+
+// Setup
+
+function prepare(homeDirectory: string, managed: string, refresh: boolean): void {
+  const root = path(homeDirectory, ".local/share/cliproxyapi-opus-test");
+  const keyPath = path(root, "proxy-key");
+  const configPath = path(root, "config.native.yaml");
+  const auth = path(root, "auth-native");
+  const modelsPath = path(homeDirectory, ".pi/agent/models.json");
+
+  // Check conflicts before creating any machine-local state.
+  for (const file of [keyPath, configPath, modelsPath]) requireRegularFile(file);
+  for (const directory of [root, auth]) requireDirectory(directory);
+
+  const provider = parseJson(readText(path(managed, "pi-provider.json")));
+  const models = existsSync(modelsPath) ? parseJson(readText(modelsPath)) : new Map();
+  if (!(models instanceof Map)) throw new SetupError("Pi models.json must contain a providers object.");
+  const providers = models.has("providers") ? models.get("providers") : new Map();
+  if (!(providers instanceof Map)) throw new SetupError("Pi models.json must contain a providers object.");
+  const existing = providers.get(PROVIDER) ?? null;
+  if (existing !== null && !pythonEqual(existing, provider)) {
+    throw new SetupError("Pi already has a different claude-pro-proxy provider; left unchanged.");
+  }
+
+  const template = readText(path(managed, "config.template.yaml"));
+  for (const marker of ['"__LOCAL_PROXY_KEY__"', '"__AUTH_DIR__"']) {
+    if (template.split(marker).length !== 2) throw new SetupError("The managed config template has invalid placeholders.");
+  }
+
+  let key: string;
+  if (existsSync(keyPath)) {
+    if (statSync(keyPath).mode & 0o077) throw new SetupError("The local proxy key must be private; expected mode 0600.");
+    key = pythonStrip(readText(keyPath));
+    if (!/^[0-9a-f]{64}$/.test(key)) throw new SetupError("The existing local proxy key has an unexpected format.");
+  } else if (existsSync(configPath)) {
+    throw new SetupError("Config exists without its local key; refusing to generate a different key.");
+  } else {
+    key = randomBytes(32).toString("hex");
+  }
+
+  privateDirectory(root);
+  privateDirectory(auth);
+  if (!existsSync(keyPath)) writePrivate(keyPath, `${key}\n`);
+
+  const rendered = template
+    .split('"__LOCAL_PROXY_KEY__"')
+    .join(quoteJson(key))
+    .split('"__AUTH_DIR__"')
+    .join(quoteJson(auth));
+  if (!existsSync(configPath)) {
+    writePrivate(configPath, rendered);
+  } else if (refresh) {
+    if (readText(configPath) !== rendered) {
+      backup(configPath, root);
+      writePrivate(configPath, rendered);
+    }
+  } else {
+    process.stdout.write("Existing native config preserved. Use --refresh-config to render the managed template.\n");
+  }
+
+  if (existing === null) {
+    if (existsSync(modelsPath)) backup(modelsPath, root);
+    providers.set(PROVIDER, provider);
+    models.set("providers", providers);
+    makeDirectory(dirname(modelsPath), 0o700);
+    writePrivate(modelsPath, `${dumpJson(models)}\n`);
+  }
+
+  process.stdout.write("Local proxy config and Pi provider ready. OAuth credentials were not copied or changed.\n");
+  process.stdout.write("No service started. Log in locally, then enable cli-proxy-api.service.\n");
+}
+
+// Bun drops a first "--" after the script path and resolves a symlinked
+// script path. Python keeps both, and argparse rejects "--", so read the raw
+// command line when Linux exposes it.
+function commandLine(): { prog: string; argv: string[] } {
+  const argv = process.argv.slice(2);
+  let raw: string[] = [];
+  try {
+    raw = readFileSync("/proc/self/cmdline", "utf8").split("\0").slice(0, -1);
+  } catch {
+    // Fall back to Bun's view of the arguments.
+  }
+
+  for (const candidate of [["--", ...argv], argv]) {
+    const offset = raw.length - candidate.length;
+    if (offset >= 1 && candidate.every((argument, index) => raw[offset + index] === argument)) {
+      return { prog: basename(raw[offset - 1]), argv: candidate };
+    }
+  }
+
+  return { prog: basename(process.argv[1] ?? "cli-proxy-setup"), argv };
+}
+
+function main(): number {
+  const { prog, argv } = commandLine();
+  const width = helpWidth();
+  let refresh: boolean;
+
+  try {
+    const parsed = parseArguments(argv);
+    if (parsed === "help") {
+      process.stdout.write(formatHelp(prog, width, painter()));
+      return 0;
+    }
+    refresh = parsed;
+  } catch (error) {
+    if (!(error instanceof UsageError)) throw error;
+    process.stderr.write(`${formatUsage(prog, width, painter())}\n${prog}: error: ${error.message}\n`);
+    return 2;
+  }
+
+  const homeDirectory = home();
+  const managed = path(process.env.XDG_CONFIG_HOME ?? path(homeDirectory, ".config"), "cli-proxy-api");
+
+  try {
+    prepare(homeDirectory, managed, refresh);
+  } catch {
+    // Do not print exception payloads: they may contain file contents or credentials.
+    process.stderr.write("cli-proxy-setup: preparation failed; existing credentials were not replaced.\n");
+    process.stderr.write("Check file types, private key permissions, JSON, template placeholders and provider conflicts.\n");
+    return 1;
+  }
+
+  return 0;
+}
+
+process.exitCode = main();
