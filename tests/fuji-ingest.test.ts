@@ -207,148 +207,28 @@ function batchFiles(directory = batch): string[] {
   return readdirSync(directory).sort();
 }
 
-const usage80 = `usage: executable_fuji-ingest [-h] [--date YYYY-MM-DD] [--root ROOT]
-                              [--dry-run] [--resume]
-                              slug
-`;
+const usage = "usage: fuji-ingest [-h] [--date YYYY-MM-DD] [--root ROOT] [--dry-run] [--resume] slug\n";
 
-const help80 = `${usage80}
-Copy and verify every file from a camera supported by gphoto2.
-
-positional arguments:
-  slug               batch name, using lowercase words and hyphens
-
-options:
-  -h, --help         show this help message and exit
-  --date YYYY-MM-DD  ingestion date used in the destination path (default:
-                     today)
-  --root ROOT        photography root (default:
-                     /home/knth/pictures/photography)
-  --dry-run          inspect the camera and planned destination without
-                     writing files
-  --resume           resume an incomplete ingest after validating its existing
-                     files
-
-Example: fuji-ingest --dry-run fuji-baseline
-         fuji-ingest fuji-baseline
-`;
-
-// A home path with hyphens exercises the help wrapping of long words.
-const help50 = `usage: executable_fuji-ingest [-h]
-                              [--date YYYY-MM-DD]
-                              [--root ROOT]
-                              [--dry-run]
-                              [--resume]
-                              slug
-
-Copy and verify every file from a camera supported by gphoto2.
-
-positional arguments:
-  slug               batch name, using lowercase
-                     words and hyphens
-
-options:
-  -h, --help         show this help message and
-                     exit
-  --date YYYY-MM-DD  ingestion date used in the
-                     destination path (default:
-                     today)
-  --root ROOT        photography root (default:
-                     /srv/long-shared-photo-libr
-                     ary/pictures/photography)
-  --dry-run          inspect the camera and
-                     planned destination without
-                     writing files
-  --resume           resume an incomplete ingest
-                     after validating its
-                     existing files
-
-Example: fuji-ingest --dry-run fuji-baseline
-         fuji-ingest fuji-baseline
-`;
-
-const help30 = `usage: executable_fuji-ingest
-       [-h]
-       [--date YYYY-MM-DD]
-       [--root ROOT]
-       [--dry-run]
-       [--resume]
-       slug
-
-Copy and verify every file from a camera supported by gphoto2.
-
-positional arguments:
-  slug  batch name, using
-        lowercase words and
-        hyphens
-
-options:
-  -h, --help
-        show this help
-        message and exit
-  --date YYYY-MM-DD
-        ingestion date used
-        in the destination
-        path (default:
-        today)
-  --root ROOT
-        photography root
-        (default: /srv/long-
-        shared-photo-library
-        /pictures/photograph
-        y)
-  --dry-run
-        inspect the camera
-        and planned
-        destination without
-        writing files
-  --resume
-        resume an incomplete
-        ingest after
-        validating its
-        existing files
-
-Example: fuji-ingest --dry-run fuji-baseline
-         fuji-ingest fuji-baseline
-`;
-
-test("help follows the terminal width", async () => {
-  const cases = [
-    { columns: "80", home: "/home/knth", expected: help80 },
-    { columns: "50", home: "/srv/long-shared-photo-library", expected: help50 },
-    { columns: "30", home: "/srv/long-shared-photo-library", expected: help30 },
-  ];
-
-  for (const { columns, home, expected } of cases) {
-    const result = await invoke(["--help"], { COLUMNS: columns, HOME: home });
+test("--help prints a short help and exits 0 without calling gphoto2", async () => {
+  for (const flag of ["--help", "-h"]) {
+    const result = await invoke(["--root", root, flag, slug], { HOME: "/home/knth" });
 
     expect(result.exitCode, result.stderr).toBe(0);
-    expect(result.stdout).toBe(expected);
+    expect(result.stdout).toStartWith(usage);
+    expect(result.stdout).toContain("(default: /home/knth/pictures/photography)");
     expect(result.stderr).toBe("");
   }
 
-  const short = await invoke(["--root", root, "-h", "test-batch"], { HOME: "/home/knth" });
-
-  expect(short.stdout).toBe(help80);
   expect(calls()).toEqual([]);
 });
 
-test("argument errors print usage and exit 2 without calling gphoto2", async () => {
+test("argument errors print the usage and exit 2 without calling gphoto2", async () => {
   const cases: [string[], string][] = [
-    [[], "the following arguments are required: slug"],
-    [["--resume", "--dry-run"], "the following arguments are required: slug"],
-    [["a", "b", "c"], "unrecognized arguments: b c"],
-    [["-x", "a"], "unrecognized arguments: -x"],
-    [["--d", "x", "a"], "ambiguous option: --d could match --date, --dry-run"],
-    [["--r", "x"], "ambiguous option: --r could match --root, --resume"],
-    [["a", "--date"], "argument --date: expected one argument"],
-    [["--date", "--resume", "a"], "argument --date: expected one argument"],
-    [["--date=2026-02-31", "--root"], "argument --root: expected one argument"],
-    [["--dry-run=yes", "a"], "argument --dry-run: ignored explicit argument 'yes'"],
-    [["-h=x"], "argument -h/--help: ignored explicit argument 'x'"],
-    // A leading "--" makes everything after it positional.
-    [["--", "a", "--resume"], "unrecognized arguments: --resume"],
-    [["--", "--", "a"], "unrecognized arguments: a"],
+    [[], "missing batch slug"],
+    [["--resume", "--dry-run"], "missing batch slug"],
+    [["a", "b", "c"], "unexpected arguments: b c"],
+    [["--bogus", "a"], "Unknown option '--bogus'"],
+    [["a", "--date"], "Option '--date <value>' argument missing"],
   ];
 
   for (const [args, message] of cases) {
@@ -356,14 +236,14 @@ test("argument errors print usage and exit 2 without calling gphoto2", async () 
 
     expect(result.exitCode, args.join(" ")).toBe(2);
     expect(result.stdout).toBe("");
-    expect(result.stderr).toBe(`${usage80}executable_fuji-ingest: error: ${message}\n`);
+    expect(result.stderr).toBe(`${usage}fuji-ingest: error: ${message}\n`);
   }
 
   expect(calls()).toEqual([]);
 });
 
-test("options accept abbreviations, = values and any position", async () => {
-  const result = await invoke(["--dry", "test-batch", `--ro=${root}`, "--da", "2026-09-23"]);
+test("options accept = values and any position", async () => {
+  const result = await invoke(["--dry-run", "test-batch", `--root=${root}`, "--date", "2026-09-23"]);
 
   expect(result.exitCode, result.stderr).toBe(0);
   expect(result.stdout).toContain(`Imported destination: ${batch}\n`);
@@ -372,8 +252,8 @@ test("options accept abbreviations, = values and any position", async () => {
 });
 
 test("invalid slugs and dates fail before touching the camera", async () => {
-  for (const bad of ["Bad", "a--b", "a_b", "trailing-", "-a", "", "été"]) {
-    const result = await invoke(["--root", root, "--date", date, "--", bad]);
+  for (const bad of ["Bad", "a--b", "a_b", "trailing-", "", "été"]) {
+    const result = await invoke(["--root", root, "--date", date, bad]);
 
     expect(result.exitCode, bad).toBe(1);
     expect(result.stderr).toBe(
@@ -381,7 +261,8 @@ test("invalid slugs and dates fail before touching the camera", async () => {
     );
   }
 
-  for (const bad of ["2026-02-31", "2026-13-01", "2026-9-3", "23/09/2026", "2026-266", "-5", ""]) {
+  const dates = ["2026-02-31", "2026-02-29", "2026-13-01", "0000-01-01", "2026-9-3", "20260923", "2026-W39-3", "-5", ""];
+  for (const bad of dates) {
     const result = await invoke(["--root", root, `--date=${bad}`, slug]);
 
     expect(result.exitCode, bad).toBe(1);
@@ -392,13 +273,11 @@ test("invalid slugs and dates fail before touching the camera", async () => {
   expect(readdirSync(root)).toEqual([]);
 });
 
-test("ISO 8601 date variants name the batch with the calendar date", async () => {
-  for (const variant of ["20260923", "2026-W39-3", "2026W393"]) {
-    const result = await invoke(["--root", root, "--date", variant, "--dry-run", slug]);
+test("a leap day is a valid date", async () => {
+  const result = await invoke(["--root", root, "--date", "2028-02-29", "--dry-run", slug]);
 
-    expect(result.exitCode, result.stderr).toBe(0);
-    expect(result.stdout).toContain(`Imported destination: ${batch}\n`);
-  }
+  expect(result.exitCode, result.stderr).toBe(0);
+  expect(result.stdout).toContain(`Imported destination: ${root}/2028/2028-02-29-${slug}\n`);
 });
 
 test("the date defaults to today in the local time zone", async () => {
@@ -485,16 +364,15 @@ test("download shows one global progress line instead of gphoto2 output", async 
   expect(result.stdout.split("\n").filter(line => line.includes("Downloading:"))).toHaveLength(1);
   const states = result.stdout.split("\n").find(line => line.includes("Downloading:"))!.split("\r").slice(1);
   expect(states.map(state => state.trimEnd())).toEqual(
-    // Python rounds half to even: 12.5 -> 12, 37.5 -> 38.
     [0, 1, 2, 3, 4, 5, 6, 7, 8].map(done => {
-      const percent = [0, 12, 25, 38, 50, 62, 75, 88, 100][done];
+      const percent = [0, 13, 25, 38, 50, 63, 75, 88, 100][done];
 
       return `Downloading: ${done}/8 files (${percent}%)`;
     }),
   );
 });
 
-test("a complete ingest writes exact checksums, manifest and summary", async () => {
+test("a complete ingest writes exact checksums, the manifest and a summary", async () => {
   const big = 9 * 1024 * 1024 + 123;
   camera([
     { folder: "/store_10000001/DCIM/101_FUJI", name: "DSCF0001.JPG", kib: 2, bytes: 2048 + 1536 },
@@ -520,7 +398,7 @@ test("a complete ingest writes exact checksums, manifest and summary", async () 
   expect(sha256(readFileSync(join(batch, "DSCF0102.RAF")))).toBe(sha256(content("DSCF0102.RAF", big)));
 
   const saved = manifest();
-  const timestamp = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d{6})?[+-]\d\d:\d\d$/;
+  const timestamp = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
   expect(saved.created_at).toMatch(timestamp);
   expect(saved.completed_at).toMatch(timestamp);
   expect(Date.parse(saved.created_at)).toBeGreaterThanOrEqual(Math.floor(before / 1000) * 1000);
@@ -539,7 +417,8 @@ test("a complete ingest writes exact checksums, manifest and summary", async () 
     sha256_manifest: "SHA256SUMS",
     status: "complete",
   };
-  expect(readFileSync(join(batch, ".fuji-ingest.json"), "utf8")).toBe(`${JSON.stringify(expected, null, 2)}\n`);
+  expect(saved).toEqual(expected);
+  expect(Object.keys(saved)).toEqual(Object.keys(expected));
 
   const lines = screen(result.stdout);
   expect(lines[5]).toMatch(/^Free space: \d+\.\d (B|KiB|MiB|GiB|TiB)$/);
@@ -647,14 +526,6 @@ test("a gphoto2 failure keeps the partial batch and prints the resume command", 
   expect(calls()).toEqual(newBatchCalls);
 });
 
-test("the resume command keeps the date exactly as typed", async () => {
-  const result = await ingest(["--date", "20260923"], { FAKE_FAIL_AFTER: "0" });
-
-  expect(result.exitCode).toBe(1);
-  expect(result.stderr).toContain(`Retry with: fuji-ingest --date 20260923 --resume ${slug}\n`);
-  expect(existsSync(join(batch, ".fuji-ingest.json"))).toBe(true);
-});
-
 test("resume deletes a truncated local file, downloads it again and keeps finished files", async () => {
   camera(jpegs(3).map(file => ({ ...file, kib: 4 })));
   const failed = await ingest([], { FAKE_FAIL_AFTER: "2", FAKE_TRUNCATE: "1" });
@@ -749,8 +620,9 @@ test("resume refuses batches that are missing, complete or unreadable", async ()
   expect(noManifest.stderr).toBe(`fuji-ingest: error: cannot resume: ${batch}/.fuji-ingest.json does not exist\n`);
 
   const cases: [string, string][] = [
-    [JSON.stringify({ status: "complete" }), "cannot resume an ingest with status 'complete'"],
-    [JSON.stringify({ inventory: [] }), "cannot resume an ingest with status None"],
+    [JSON.stringify({ status: "complete" }), 'cannot resume an ingest with status "complete"'],
+    [JSON.stringify({ inventory: [] }), "cannot resume an ingest with status null"],
+    ["[]", `could not read the incomplete ingest manifest ${batch}/.fuji-ingest.json: expected a JSON object`],
   ];
   for (const [text, message] of cases) {
     writeFileSync(join(batch, ".fuji-ingest.json"), text);
@@ -940,43 +812,19 @@ test("the installed script runs through its Bun shebang without a file extension
   const env = environment({ PATH: `${bin}:${toolDirectory}:${bunDirectory}` });
 
   const result = await run([installed, "--root", root, "--date", date, "--dry-run", slug], { env });
-  const usage = await run([installed], { env });
+  const missing = await run([installed], { env });
 
   expect(result.exitCode, result.stderr).toBe(0);
   expect(result.stdout).toContain(`Imported destination: ${batch}\n`);
-  expect(usage.exitCode).toBe(2);
-  expect(usage.stderr).toBe(
-    "usage: fuji-ingest [-h] [--date YYYY-MM-DD] [--root ROOT] [--dry-run]\n" +
-      "                   [--resume]\n" +
-      "                   slug\n" +
-      "fuji-ingest: error: the following arguments are required: slug\n",
-  );
+  expect(missing.exitCode).toBe(2);
+  expect(missing.stderr).toBe(`${usage}fuji-ingest: error: missing batch slug\n`);
 });
 
-test("sizes are rounded half to even like Python", async () => {
-  camera([{ name: "DSCF0001.RAF", kib: 1280 }]);
-  const quarter = await ingest(["--dry-run"]);
-  camera([{ name: "DSCF0001.RAF", kib: 1792 }]);
-  const threeQuarters = await ingest(["--dry-run"]);
+test("--root expands ~ to the home directory", async () => {
+  const result = await invoke(["--root=~/photography", "--date", date, "--dry-run", slug]);
 
-  expect(quarter.stdout).toContain("Camera files: 1 (1.2 MiB)\n");
-  expect(threeQuarters.stdout).toContain("Camera files: 1 (1.8 MiB)\n");
-});
-
-test("--root expands ~ and resolves symlinks before ..", async () => {
-  const deep = join(temporary.path, "deep/inside");
-  mkdirSync(deep, { recursive: true });
-  symlinkSync(deep, join(temporary.path, "link"));
-
-  const tilde = await invoke(["--root=~/photography", "--date", date, "--dry-run", slug]);
-  const linked = await run([...command, "--root", "link/../photos", "--date", date, "--dry-run", slug], {
-    cwd: temporary.path,
-    env: environment(),
-  });
-
-  expect(tilde.stdout).toContain(`Imported destination: ${batch}\n`);
-  expect(linked.exitCode, linked.stderr).toBe(0);
-  expect(linked.stdout).toContain(`Imported destination: ${temporary.path}/deep/photos/2026/${date}-${slug}\n`);
+  expect(result.exitCode, result.stderr).toBe(0);
+  expect(result.stdout).toContain(`Imported destination: ${batch}\n`);
 });
 
 test("Ctrl+C kills gphoto2 when it ignores SIGTERM for 5 seconds", async () => {

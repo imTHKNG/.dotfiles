@@ -1,67 +1,47 @@
 #!/usr/bin/env bun
 // Ingest every file from one PTP camera into a dated photography batch.
 //
-// This script replaced a Python version. It keeps the same arguments, help,
-// messages, exit codes and files, so a batch started by one version can be
-// resumed by the other. The helpers below reproduce the Python details that
-// matter here: argparse and textwrap formatting, pathlib paths and suffixes,
-// date.fromisoformat, json.dump(indent=2, sort_keys=True) with ASCII escapes,
-// round() and "{:.1f}" rounding half to even, and code point string order.
+// gphoto2 copies the files; nothing on the camera is ever deleted. The script
+// checks names and sizes against the camera listing, then writes SHA256SUMS.
+// The .fuji-ingest.json manifest keeps the format of the earlier Python
+// version, so a batch started by either version can be resumed by this one.
 
 import type { Subprocess } from "bun";
-import { createHash, randomInt } from "node:crypto";
-import {
-  closeSync,
-  fstatSync,
-  lstatSync,
-  mkdirSync,
-  mkdtempSync,
-  openSync,
-  readdirSync,
-  readFileSync,
-  readlinkSync,
-  readSync,
-  renameSync,
-  rmdirSync,
-  statfsSync,
-  statSync,
-  unlinkSync,
-  writeSync,
-} from "node:fs";
-import { open } from "node:fs/promises";
-import { tmpdir, userInfo } from "node:os";
-import { basename, join } from "node:path";
-import { isatty } from "node:tty";
+import { createHash } from "node:crypto";
+import * as fs from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import { parseArgs } from "node:util";
 
 const MANIFEST_NAME = ".fuji-ingest.json";
 const CHECKSUM_NAME = "SHA256SUMS";
-const CONTROL_NAMES = new Set([MANIFEST_NAME, CHECKSUM_NAME, `${CHECKSUM_NAME}.tmp`]);
+const CONTROL_NAMES = new Set([MANIFEST_NAME, `${MANIFEST_NAME}.tmp`, CHECKSUM_NAME, `${CHECKSUM_NAME}.tmp`]);
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const FILE_RE = /^#\d+\s+(.+?)\s+\S+\s+(\d+) KB(?:\s|$)/u;
-const FOLDER_RE = /^There (?:is|are).* folder '([^']+)'\./u;
-const CHUNK_SIZE = 4 * 1024 * 1024;
+const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+const FILE_RE = /^#\d+\s+(.+?)\s+\S+\s+(\d+) KB(?:\s|$)/;
+const FOLDER_RE = /^There (?:is|are).* folder '([^']+)'\./;
+const SIZE_TOLERANCE_KIB = 1.5;
 const POLL_MS = 200;
-const INTERRUPTED = "\nfuji-ingest: interrupted; camera files were not deleted\n";
+const USAGE = "usage: fuji-ingest [-h] [--date YYYY-MM-DD] [--root ROOT] [--dry-run] [--resume] slug";
 
 type InventoryItem = { folder: string; name: string; size_kib: number };
-type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
-type Manifest = { [key: string]: Json };
+type Manifest = Record<string, unknown>;
+type Arguments = { slug: string; date: string; root: string; dryRun: boolean; resume: boolean };
 
 class IngestError extends Error {}
+class UsageError extends Error {}
 
 function fail(message: string): never {
   throw new IngestError(message);
 }
 
-// Output
-
-// Synchronous writes keep stdout and stderr complete when process.exit() runs.
+// Synchronous writes keep the output complete when process.exit() runs.
 function write(fd: number, text: string): void {
   let buffer = Buffer.from(text);
 
   while (buffer.length > 0) {
     try {
-      buffer = buffer.subarray(writeSync(fd, buffer));
+      buffer = buffer.subarray(fs.writeSync(fd, buffer));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EAGAIN") throw error;
     }
@@ -72,833 +52,137 @@ function print(line = ""): void {
   write(1, `${line}\n`);
 }
 
-// Python compatibility
+function compare(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
 
-// Python compares strings by code point; JavaScript compares UTF-16 units.
-function compareText(left: string, right: string): number {
-  const a = Array.from(left, character => character.codePointAt(0)!);
-  const b = Array.from(right, character => character.codePointAt(0)!);
-
-  for (let index = 0; index < Math.min(a.length, b.length); index += 1) {
-    if (a[index] !== b[index]) return a[index]! - b[index]!;
+function formatSize(size: number): string {
+  let value = size;
+  for (const unit of ["B", "KiB", "MiB", "GiB"]) {
+    if (value < 1024) return `${value.toFixed(1)} ${unit}`;
+    value /= 1024;
   }
 
-  return a.length - b.length;
+  return `${value.toFixed(1)} TiB`;
 }
 
-function compareLists(left: string[], right: string[]): number {
-  for (let index = 0; index < Math.min(left.length, right.length); index += 1) {
-    const order = compareText(left[index]!, right[index]!);
-    if (order !== 0) return order;
+function statPath(path: string, followLinks = true) {
+  try {
+    return followLinks ? fs.statSync(path) : fs.lstatSync(path);
+  } catch {
+    return undefined;
   }
-
-  return left.length - right.length;
 }
 
-// sorted() on pathlib paths compares their parts, so "a/b" sorts before "a-c".
-function comparePaths(left: string, right: string): number {
-  return compareLists(left.split("/"), right.split("/"));
-}
+const exists = (path: string) => statPath(path) !== undefined;
+const isFile = (path: string) => statPath(path)?.isFile() ?? false;
+const isDirectory = (path: string) => statPath(path)?.isDirectory() ?? false;
 
-// str.splitlines()
-function splitLines(text: string): string[] {
-  const lines = text.split(/\r\n|[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]/);
-  if (lines.at(-1) === "") lines.pop();
-
-  return lines;
-}
-
-// Text-mode subprocess output with universal newlines.
-function decodeOutput(bytes: Uint8Array): string {
-  return new TextDecoder().decode(bytes).replace(/\r\n?/g, "\n");
-}
-
-// round(): ties go to the even neighbour.
-function roundHalfEven(value: number): number {
-  const floor = Math.floor(value);
-  const fraction = value - floor;
-
-  if (fraction > 0.5) return floor + 1;
-  if (fraction < 0.5) return floor;
-
-  return floor % 2 === 0 ? floor : floor + 1;
-}
-
-// f"{value:.1f}": an exact tie such as 1.25 rounds to even, toFixed rounds it up.
-function fixed1(value: number): string {
-  const quarters = value * 4;
-  if (!Number.isInteger(quarters) || quarters % 2 === 0) return value.toFixed(1);
-
-  let tenths = Math.floor(value * 10);
-  if (tenths % 2 !== 0) tenths += 1;
-
-  return (tenths / 10).toFixed(1);
-}
-
-// repr() of a str.
-function reprString(text: string): string {
-  const quote = text.includes("'") && !text.includes('"') ? '"' : "'";
-  let result = "";
-
-  for (const character of text) {
-    const code = character.codePointAt(0)!;
-    if (character === "\\" || character === quote) result += `\\${character}`;
-    else if (character === "\n") result += "\\n";
-    else if (character === "\r") result += "\\r";
-    else if (character === "\t") result += "\\t";
-    else if (character !== " " && /[\p{C}\p{Z}]/u.test(character)) {
-      if (code < 0x100) result += `\\x${code.toString(16).padStart(2, "0")}`;
-      else if (code < 0x10000) result += `\\u${code.toString(16).padStart(4, "0")}`;
-      else result += `\\U${code.toString(16).padStart(8, "0")}`;
-    } else result += character;
-  }
-
-  return `${quote}${result}${quote}`;
-}
-
-// repr() of a value loaded with json.loads.
-function repr(value: Json | undefined): string {
-  if (value === undefined || value === null) return "None";
-  if (value === true) return "True";
-  if (value === false) return "False";
-  if (typeof value === "number") return formatNumber(value);
-  if (typeof value === "string") return reprString(value);
-  if (Array.isArray(value)) return `[${value.map(repr).join(", ")}]`;
-
-  return `{${Object.entries(value)
-    .map(([key, item]) => `${reprString(key)}: ${repr(item)}`)
-    .join(", ")}}`;
-}
-
-// Integers as str(int), other numbers as repr(float).
-function formatNumber(value: number): string {
-  if (Number.isInteger(value)) return BigInt(value).toString();
-
-  const [mantissa, exponent] = value.toExponential().split("e") as [string, string];
-  if (Number(exponent) >= -4) return String(value);
-
-  return `${mantissa}e-${String(-Number(exponent)).padStart(2, "0")}`;
-}
-
-function jsonString(text: string): string {
-  return JSON.stringify(text).replace(
-    /[\u007f-\uffff]/g,
-    character => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
-  );
-}
-
-// json.dump(value, indent=2, sort_keys=True) with the default ensure_ascii.
-function dumpJson(value: Json, level = 0): string {
-  if (value === null) return "null";
-  if (typeof value === "boolean") return String(value);
-  if (typeof value === "number") return formatNumber(value);
-  if (typeof value === "string") return jsonString(value);
-
-  const inner = "  ".repeat(level + 1);
-  const outer = "  ".repeat(level);
-
-  if (Array.isArray(value)) {
-    if (value.length === 0) return "[]";
-
-    return `[\n${value.map(item => inner + dumpJson(item, level + 1)).join(",\n")}\n${outer}]`;
-  }
-
-  const keys = Object.keys(value).sort(compareText);
-  if (keys.length === 0) return "{}";
-  const entries = keys.map(key => `${inner}${jsonString(key)}: ${dumpJson(value[key]!, level + 1)}`);
-
-  return `{\n${entries.join(",\n")}\n${outer}}`;
-}
-
-// Equality of values loaded with json.loads.
-function jsonEqual(left: Json | undefined, right: Json | undefined): boolean {
-  if (left === right) return true;
-  if (typeof left !== "object" || typeof right !== "object" || left === null || right === null) return false;
-
-  if (Array.isArray(left) || Array.isArray(right)) {
-    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
-
-    return left.every((item, index) => jsonEqual(item, right[index]));
-  }
-
-  const keys = Object.keys(left);
-  if (keys.length !== Object.keys(right).length) return false;
-
-  return keys.every(key => Object.hasOwn(right, key) && jsonEqual(left[key], right[key]));
-}
-
-// "[Errno 13] Permission denied: '/path'", as Python formats an OSError.
-function osErrorMessage(error: unknown, path: string): string {
-  const known: Record<string, [number, string]> = {
-    EACCES: [13, "Permission denied"],
-    EIO: [5, "Input/output error"],
-    EISDIR: [21, "Is a directory"],
-    ENOENT: [2, "No such file or directory"],
-    ENOTDIR: [20, "Not a directory"],
-    EPERM: [1, "Operation not permitted"],
-  };
-  const code = (error as NodeJS.ErrnoException).code ?? "";
-  const entry = known[code];
-  if (!entry) return (error as Error).message;
-
-  return `[Errno ${entry[0]}] ${entry[1]}: ${reprString(path)}`;
-}
-
-// Dates
-
-type CalendarDate = { year: number; month: number; day: number };
-
-function isLeap(year: number): boolean {
-  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
-}
-
-function daysInMonth(year: number, month: number): number {
-  return [31, isLeap(year) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]!;
-}
-
-function validDate(date: CalendarDate): CalendarDate | undefined {
-  const { year, month, day } = date;
-  if (year < 1 || year > 9999 || month < 1 || month > 12) return undefined;
-  if (day < 1 || day > daysInMonth(year, month)) return undefined;
-
-  return date;
-}
-
-// Days since 1970-01-01, after Howard Hinnant's days_from_civil.
-function daysFromCivil(year: number, month: number, day: number): number {
-  const shifted = month <= 2 ? year - 1 : year;
-  const era = Math.floor(shifted / 400);
-  const yearOfEra = shifted - era * 400;
-  const dayOfYear = Math.floor((153 * (month + (month > 2 ? -3 : 9)) + 2) / 5) + day - 1;
-  const dayOfEra = yearOfEra * 365 + Math.floor(yearOfEra / 4) - Math.floor(yearOfEra / 100) + dayOfYear;
-
-  return era * 146097 + dayOfEra - 719468;
-}
-
-function civilFromDays(days: number): CalendarDate {
-  const shifted = days + 719468;
-  const era = Math.floor(shifted / 146097);
-  const dayOfEra = shifted - era * 146097;
-  const yearOfEra = Math.floor(
-    (dayOfEra - Math.floor(dayOfEra / 1460) + Math.floor(dayOfEra / 36524) - Math.floor(dayOfEra / 146096)) / 365,
-  );
-  const dayOfYear = dayOfEra - (365 * yearOfEra + Math.floor(yearOfEra / 4) - Math.floor(yearOfEra / 100));
-  const monthIndex = Math.floor((5 * dayOfYear + 2) / 153);
-  const day = dayOfYear - Math.floor((153 * monthIndex + 2) / 5) + 1;
-  const month = monthIndex < 10 ? monthIndex + 3 : monthIndex - 9;
-
-  return { year: yearOfEra + era * 400 + (month <= 2 ? 1 : 0), month, day };
-}
-
-// Monday is 0; 1970-01-01 was a Thursday.
-function weekday(days: number): number {
-  return (((days + 3) % 7) + 7) % 7;
-}
-
-function isoWeekDate(year: number, week: number, day: number): CalendarDate | undefined {
-  if (year < 1 || year > 9999) return undefined;
-
-  const firstDay = daysFromCivil(year, 1, 1);
-  const firstWeekday = weekday(firstDay);
-  const longYear = firstWeekday === 3 || (firstWeekday === 2 && isLeap(year));
-  if (week < 1 || week > 53 || (week === 53 && !longYear)) return undefined;
-  if (day < 1 || day > 7) return undefined;
-
-  const weekOneMonday = firstDay - firstWeekday + (firstWeekday > 3 ? 7 : 0);
-
-  return validDate(civilFromDays(weekOneMonday + (week - 1) * 7 + day - 1));
-}
-
-// date.fromisoformat() as implemented in CPython's C module: YYYY-MM-DD,
-// YYYYMMDD, YYYY-Www[-D] and YYYYWww[D]. Like CPython, it ignores trailing
-// characters of a 10-character string without separators.
-function parseIsoDate(text: string): CalendarDate | undefined {
-  const length = Buffer.byteLength(text);
-  if (![7, 8, 10].includes(length)) return undefined;
-
-  let position = 0;
-  const digits = (count: number): number | undefined => {
-    const part = text.slice(position, position + count);
-    if (part.length !== count || !/^[0-9]+$/.test(part)) return undefined;
-    position += count;
-
-    return Number(part);
-  };
-
-  const year = digits(4);
-  if (year === undefined) return undefined;
-  const separator = text[position] === "-";
-  if (separator) position += 1;
-
-  if (text[position] === "W") {
-    position += 1;
-    const week = digits(2);
-    if (week === undefined) return undefined;
-
-    let day = 1;
-    if (position < length) {
-      if (separator && text[position++] !== "-") return undefined;
-      const parsed = digits(1);
-      if (parsed === undefined) return undefined;
-      day = parsed;
-    }
-
-    return isoWeekDate(year, week, day);
-  }
-
-  const month = digits(2);
-  if (month === undefined) return undefined;
-  if (separator && text[position++] !== "-") return undefined;
-  const day = digits(2);
-  if (day === undefined) return undefined;
-
-  return validDate({ year, month, day });
-}
-
-function pad(value: number, width = 2): string {
-  return String(value).padStart(width, "0");
-}
-
-function isoDate(date: CalendarDate): string {
-  return `${pad(date.year, 4)}-${pad(date.month)}-${pad(date.day)}`;
+function defaultRoot(): string {
+  return join(homedir(), "pictures", "photography");
 }
 
 function today(): string {
   const now = new Date();
 
-  return isoDate({ year: now.getFullYear(), month: now.getMonth() + 1, day: now.getDate() });
+  return [now.getFullYear(), now.getMonth() + 1, now.getDate()].map(part => String(part).padStart(2, "0")).join("-");
 }
 
-// datetime.now().astimezone().isoformat()
-function timestamp(): string {
-  const epochMs = performance.timeOrigin + performance.now();
-  const now = new Date(Math.floor(epochMs));
-  const microseconds = Math.floor(epochMs * 1000) % 1_000_000;
-  const offset = -now.getTimezoneOffset();
-  const sign = offset < 0 ? "-" : "+";
-  const fraction = microseconds === 0 ? "" : `.${pad(microseconds, 6)}`;
-  const date = isoDate({ year: now.getFullYear(), month: now.getMonth() + 1, day: now.getDate() });
-  const time = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+function helpText(): string {
+  return `${USAGE}
 
-  return `${date}T${time}${fraction}${sign}${pad(Math.floor(Math.abs(offset) / 60))}:${pad(Math.abs(offset) % 60)}`;
+Copy and verify every file from a camera supported by gphoto2.
+
+arguments:
+  slug               batch name: lowercase letters, digits and single hyphens
+
+options:
+  -h, --help         show this help and exit
+  --date YYYY-MM-DD  ingestion date used in the destination path (default: today)
+  --root ROOT        photography root (default: ${defaultRoot()})
+  --dry-run          inspect the camera and destination without writing files
+  --resume           resume an incomplete ingest after checking its files
+
+Example: fuji-ingest --dry-run fuji-baseline
+         fuji-ingest fuji-baseline
+`;
 }
 
-// Paths
-
-// str(pathlib.Path(text)): drops empty and "." parts, keeps "..", keeps a leading "//".
-function purePath(text: string): string {
-  const root = /^\/\/(?!\/)/.test(text) ? "//" : text.startsWith("/") ? "/" : "";
-  const parts = text.split("/").filter(part => part !== "" && part !== ".");
-
-  return root + parts.join("/") || ".";
-}
-
-function joinPath(base: string, ...parts: string[]): string {
-  return parts.reduce((path, part) => (path.endsWith("/") ? `${path}${part}` : `${path}/${part}`), base);
-}
-
-function passwdHome(user: string): string | undefined {
+function parseArguments(argv: string[]): Arguments | "help" {
+  let parsed;
   try {
-    for (const line of readFileSync("/etc/passwd", "utf8").split("\n")) {
-      const fields = line.split(":");
-      if (fields[0] === user && fields.length >= 7) return fields[5];
-    }
-  } catch {
-    return undefined;
+    parsed = parseArgs({
+      args: argv,
+      allowPositionals: true,
+      options: {
+        help: { type: "boolean", short: "h" },
+        date: { type: "string" },
+        root: { type: "string" },
+        "dry-run": { type: "boolean" },
+        resume: { type: "boolean" },
+      },
+    });
+  } catch (error) {
+    // Node's messages go on with advice about "--"; the first sentence is enough.
+    throw new UsageError((error as Error).message.split(/\.\s/)[0]!);
   }
 
-  return undefined;
+  const { values, positionals } = parsed;
+  if (values.help) return "help";
+  if (positionals.length === 0) throw new UsageError("missing batch slug");
+  if (positionals.length > 1) throw new UsageError(`unexpected arguments: ${positionals.slice(1).join(" ")}`);
+
+  const { date = today(), root = defaultRoot(), "dry-run": dryRun = false, resume = false } = values;
+
+  return { slug: positionals[0]!, date, root, dryRun, resume };
 }
 
-// os.path.expanduser("~"): HOME when set, even if empty, otherwise the passwd entry.
-function homeDirectory(): string {
-  return (process.env.HOME ?? userInfo().homedir).replace(/\/+$/, "") || "/";
+// Accepts YYYY-MM-DD only and refuses impossible dates such as 2026-02-31.
+function dateYear(text: string): string | undefined {
+  const match = DATE_RE.exec(text);
+  if (!match) return undefined;
+
+  const [year, month, day] = match.slice(1).map(Number) as [number, number, number];
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  const valid = year >= 1 && date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+
+  return valid ? match[1] : undefined;
 }
 
-// Path.expanduser()
-function expandUser(path: string): string {
-  if (!path.startsWith("~")) return path;
-
-  const slash = path.indexOf("/");
-  const end = slash === -1 ? path.length : slash;
-  const user = path.slice(1, end);
-  const home = user === "" ? homeDirectory() : passwdHome(user)?.replace(/\/+$/, "");
-  if (home === undefined) fail("Could not determine home directory.");
-
-  return purePath(home + path.slice(end) || "/");
-}
-
-// Path.resolve(): os.path.realpath(strict=False). Symlinks in the existing part
-// are resolved before "..", missing parts are kept as written.
-function resolvePath(input: string): string {
-  const rest: (string | null)[] = input.split("/").reverse();
-  let partCount = rest.length;
-  let path = input.startsWith("/") ? "/" : process.cwd();
-  const seen = new Map<string, string | null>();
-
-  while (partCount > 0) {
-    const name = rest.pop()!;
-    if (name === null) {
-      seen.set(rest.pop()!, path);
-      continue;
-    }
-    partCount -= 1;
-    if (name === "" || name === ".") continue;
-    if (name === "..") {
-      path = path.slice(0, path.lastIndexOf("/")) || "/";
-      continue;
-    }
-
-    const next = path === "/" ? `/${name}` : `${path}/${name}`;
-    let target: string;
-    try {
-      if (!lstatSync(next).isSymbolicLink()) {
-        path = next;
-        continue;
-      }
-      if (seen.has(next)) {
-        path = seen.get(next) ?? next;
-        continue;
-      }
-      target = readlinkSync(next);
-    } catch {
-      path = next;
-      continue;
-    }
-
-    if (target.startsWith("/")) path = "/";
-    seen.set(next, null);
-    rest.push(next, null);
-    const targetParts = target.split("/").reverse();
-    rest.push(...targetParts);
-    partCount += targetParts.length;
-  }
-
-  return path;
-}
-
-// pathlib treats any stat error as "does not exist".
-function statPath(path: string) {
-  try {
-    return statSync(path);
-  } catch {
-    return undefined;
-  }
-}
-
-function exists(path: string): boolean {
-  return statPath(path) !== undefined;
-}
-
-function isDirectory(path: string): boolean {
-  return statPath(path)?.isDirectory() ?? false;
-}
-
-function isFile(path: string): boolean {
-  return statPath(path)?.isFile() ?? false;
-}
-
-// PurePath.suffix
-function suffix(name: string): string {
-  const last = name.slice(name.lastIndexOf("/") + 1).replace(/^\.+/, "");
-  const dot = last.lastIndexOf(".");
-
-  return dot === -1 ? "" : last.slice(dot);
-}
-
-// Command line, following Python 3.14 argparse
-
-type Arguments = { slug: string; date: string; root: string; dryRun: boolean; resume: boolean };
-type ActionName = "help" | "date" | "root" | "dryRun" | "resume";
-type OptionMatch = { action?: ActionName; option: string; sep?: string; explicit?: string };
-
-const DESCRIPTION = "Copy and verify every file from a camera supported by gphoto2.";
-const EPILOG = "Example: fuji-ingest --dry-run fuji-baseline\n         fuji-ingest fuji-baseline";
-const OPTION_ACTIONS: [string, ActionName][] = [
-  ["-h", "help"],
-  ["--help", "help"],
-  ["--date", "date"],
-  ["--root", "root"],
-  ["--dry-run", "dryRun"],
-  ["--resume", "resume"],
-];
-const OPTIONS = new Map(OPTION_ACTIONS);
-const ACTION_LABELS: Record<ActionName, string> = {
-  help: "-h/--help",
-  date: "--date",
-  root: "--root",
-  dryRun: "--dry-run",
-  resume: "--resume",
-};
-
-class UsageError extends Error {}
-
-function defaultRoot(): string {
-  return joinPath(homeDirectory(), "pictures", "photography");
-}
-
-// shutil.get_terminal_size().columns - 2
-function helpWidth(): number {
-  const value = (process.env.COLUMNS ?? "").trim();
-  const columns = /^[+-]?\d+(?:_\d+)*$/.test(value) ? Number(value.replaceAll("_", "")) : 0;
-  const terminal = isatty(1) ? process.stdout.columns || 80 : 80;
-
-  return (columns > 0 ? columns : terminal) - 2;
-}
-
-// textwrap.TextWrapper chunking with break_on_hyphens=True.
-const WORD_PUNCT = String.raw`[\p{L}\p{N}_!"'&.,?]`;
-const LETTER = String.raw`[\p{L}\p{Nl}\p{No}_]`;
-const SPACE = String.raw`[\t\n\v\f\r ]`;
-const NOT_SPACE = String.raw`[^\t\n\v\f\r ]`;
-const WORD_SEPARATOR = new RegExp(
-  `(${SPACE}+` +
-    `|(?<=${WORD_PUNCT})-{2,}(?=\\w)` +
-    `|${NOT_SPACE}+?(?:-(?:(?<=${LETTER}{2}-)|(?<=${LETTER}-${LETTER}-))(?=${LETTER}-?${LETTER})` +
-    `|(?=${SPACE}|$)` +
-    `|(?<=${WORD_PUNCT})(?=-{2,}\\w)))`,
-  "gu",
-);
-
-function wrapChunks(text: string): string[] {
-  const chunks: string[] = [];
-  let last = 0;
-
-  for (const match of text.matchAll(WORD_SEPARATOR)) {
-    if (match.index > last) chunks.push(text.slice(last, match.index));
-    if (match[0]) chunks.push(match[0]);
-    last = match.index + match[0].length;
-  }
-  if (last < text.length) chunks.push(text.slice(last));
-
-  return chunks;
-}
-
-// textwrap.wrap(text, width) with the default options argparse uses.
-function wrap(text: string, width: number): string[] {
-  const chunks = wrapChunks(text).reverse();
-  const lines: string[] = [];
-
-  while (chunks.length > 0) {
-    const line: string[] = [];
-    let length = 0;
-    if (chunks.at(-1)!.trim() === "" && lines.length > 0) chunks.pop();
-
-    while (chunks.length > 0 && length + chunks.at(-1)!.length <= width) {
-      const chunk = chunks.pop()!;
-      line.push(chunk);
-      length += chunk.length;
-    }
-
-    if (chunks.length > 0 && chunks.at(-1)!.length > width) {
-      const chunk = chunks.at(-1)!;
-      const spaceLeft = width < 1 ? 1 : width - length;
-      let end = spaceLeft;
-      const hyphen = chunk.lastIndexOf("-", spaceLeft - 1);
-      if (chunk.length > spaceLeft && hyphen > 0 && /[^-]/.test(chunk.slice(0, hyphen))) end = hyphen + 1;
-      line.push(chunk.slice(0, end));
-      chunks[chunks.length - 1] = chunk.slice(end);
-    }
-
-    if (line.length > 0 && line.at(-1)!.trim() === "") line.pop();
-    if (line.length > 0) lines.push(line.join(""));
-  }
-
-  return lines;
-}
-
-function usageText(prog: string, width: number): string {
-  const prefix = "usage: ";
-  const optionalParts = ["[-h]", "[--date YYYY-MM-DD]", "[--root ROOT]", "[--dry-run]", "[--resume]"];
-  const positionalParts = ["slug"];
-  const full = [prog, ...optionalParts, ...positionalParts].join(" ");
-  if (prefix.length + full.length <= width) return `${prefix}${full}\n`;
-
-  const lines = (parts: string[], indent: string, withPrefix = false): string[] => {
-    const result: string[] = [];
-    let line: string[] = [];
-    let length = (withPrefix ? prefix.length : indent.length) - 1;
-
-    for (const part of parts) {
-      if (length + 1 + part.length > width && line.length > 0) {
-        result.push(indent + line.join(" "));
-        line = [];
-        length = indent.length - 1;
-      }
-      line.push(part);
-      length += part.length + 1;
-    }
-    if (line.length > 0) result.push(indent + line.join(" "));
-    if (withPrefix) result[0] = result[0]!.slice(indent.length);
-
-    return result;
-  };
-
-  let wrapped: string[];
-  if (prefix.length + prog.length <= 0.75 * width) {
-    const indent = " ".repeat(prefix.length + prog.length + 1);
-    wrapped = [...lines([prog, ...optionalParts], indent, true), ...lines(positionalParts, indent)];
-  } else {
-    const indent = " ".repeat(prefix.length);
-    wrapped = lines([...optionalParts, ...positionalParts], indent);
-    if (wrapped.length > 1) wrapped = [...lines(optionalParts, indent), ...lines(positionalParts, indent)];
-    wrapped = [prog, ...wrapped];
-  }
-
-  return `${prefix}${wrapped.join("\n")}\n`;
-}
-
-function helpText(prog: string, width: number): string {
-  const entries: [string, string][] = [
-    ["slug", "batch name, using lowercase words and hyphens"],
-    ["-h, --help", "show this help message and exit"],
-    ["--date YYYY-MM-DD", "ingestion date used in the destination path (default: today)"],
-    ["--root ROOT", `photography root (default: ${defaultRoot()})`],
-    ["--dry-run", "inspect the camera and planned destination without writing files"],
-    ["--resume", "resume an incomplete ingest after validating its existing files"],
-  ];
-  const indent = 2;
-  const maxHelpPosition = Math.min(24, Math.max(width - 20, 4));
-  const longest = Math.max(...entries.map(([invocation]) => invocation.length + indent));
-  const helpPosition = Math.min(longest + 2, maxHelpPosition);
-  const textWidth = Math.max(width - helpPosition, 11);
-  const actionWidth = helpPosition - indent - 2;
-
-  const format = ([invocation, help]: [string, string]): string => {
-    const lines = wrap(help.replace(/[ \t\n\r\f\v]+/g, " ").trim(), textWidth);
-    const first =
-      invocation.length <= actionWidth
-        ? `${" ".repeat(indent)}${invocation.padEnd(actionWidth)}  ${lines[0]}\n`
-        : `${" ".repeat(indent)}${invocation}\n${" ".repeat(helpPosition)}${lines[0]}\n`;
-
-    return first + lines.slice(1).map(line => `${" ".repeat(helpPosition)}${line}\n`).join("");
-  };
-
-  return [
-    usageText(prog, width),
-    `\n${DESCRIPTION}\n\n`,
-    "positional arguments:\n",
-    format(entries[0]!),
-    "\noptions:\n",
-    entries.slice(1).map(format).join(""),
-    `\n${EPILOG}\n`,
-  ].join("");
-}
-
-function optionTuples(arg: string): OptionMatch[] {
-  const equals = arg.indexOf("=");
-  const prefix = equals === -1 ? arg : arg.slice(0, equals);
-  const sep = equals === -1 ? undefined : "=";
-  const explicit = equals === -1 ? undefined : arg.slice(equals + 1);
-  const result: OptionMatch[] = [];
-
-  for (const [option, action] of OPTION_ACTIONS) {
-    if (arg[1] !== "-" && option === arg.slice(0, 2)) result.push({ action, option, sep: "", explicit: arg.slice(2) });
-    else if (option.startsWith(prefix)) result.push({ action, option, sep, explicit });
-  }
-
-  return result;
-}
-
-// ArgumentParser._parse_optional: undefined means a positional argument.
-function parseOptional(arg: string): OptionMatch[] | undefined {
-  if (!arg.startsWith("-")) return undefined;
-  const exact = OPTIONS.get(arg);
-  if (exact) return [{ action: exact, option: arg }];
-  if (arg.length === 1) return undefined;
-
-  const equals = arg.indexOf("=");
-  const named = equals === -1 ? undefined : OPTIONS.get(arg.slice(0, equals));
-  if (named) return [{ action: named, option: arg.slice(0, equals), sep: "=", explicit: arg.slice(equals + 1) }];
-
-  const tuples = optionTuples(arg);
-  if (tuples.length > 0) return tuples;
-  if (/^-\d+$|^-\d*\.\d+$/.test(arg)) return undefined;
-  if (arg.includes(" ")) return undefined;
-
-  return [{ option: arg }];
-}
-
-// ArgumentParser.parse_args for this parser: options are consumed from left
-// to right, -h exits as soon as it is reached, then a missing slug and
-// unrecognized arguments are reported in that order.
-function parseArguments(argv: string[], prog: string): Arguments {
-  const patterns: string[] = [];
-  const optionals = new Map<number, OptionMatch[]>();
-  let separatorSeen = false;
-
-  argv.forEach((arg, index) => {
-    if (separatorSeen) {
-      patterns.push("A");
-    } else if (arg === "--") {
-      patterns.push("-");
-      separatorSeen = true;
-    } else {
-      const match = parseOptional(arg);
-      if (match) optionals.set(index, match);
-      patterns.push(match ? "O" : "A");
-    }
-  });
-
-  const pattern = patterns.join("");
-  const values = { slug: undefined as string | undefined, date: today(), root: defaultRoot(), dryRun: false, resume: false };
-  const extras: string[] = [];
-  const usageError = (message: string): never => {
-    throw new UsageError(message);
-  };
-
-  const apply = (action: ActionName, value?: string): void => {
-    if (action === "help") {
-      write(1, helpText(prog, helpWidth()));
-      process.exit(0);
-    }
-    if (action === "date") values.date = value!;
-    if (action === "root") values.root = purePath(value!);
-    if (action === "dryRun") values.dryRun = true;
-    if (action === "resume") values.resume = true;
-  };
-
-  const consumePositionals = (start: number): number => {
-    if (values.slug !== undefined) return start;
-    const match = /^-*A-*/.exec(pattern.slice(start));
-    if (!match) return start;
-
-    const args = argv.slice(start, start + match[0].length);
-    if (match[0].includes("-")) args.splice(args.indexOf("--"), 1);
-    values.slug = args[0]!;
-
-    return start + match[0].length;
-  };
-
-  const consumeOptional = (start: number): number => {
-    const matches = optionals.get(start)!;
-    if (matches.length > 1) {
-      usageError(`ambiguous option: ${argv[start]} could match ${matches.map(match => match.option).join(", ")}`);
-    }
-
-    let { action, option, sep, explicit } = matches[0]!;
-    const taken: [ActionName, string | undefined][] = [];
-    let stop = start + 1;
-
-    while (true) {
-      if (action === undefined) {
-        extras.push(argv[start]!);
-        return start + 1;
-      }
-
-      const ignored = () => usageError(`argument ${ACTION_LABELS[action!]}: ignored explicit argument ${reprString(explicit!)}`);
-      const argumentCount = action === "date" || action === "root" ? 1 : 0;
-
-      if (explicit === undefined) {
-        if (argumentCount === 1) {
-          if (pattern[start + 1] !== "A") usageError(`argument ${ACTION_LABELS[action]}: expected one argument`);
-          taken.push([action, argv[start + 1]]);
-          stop = start + 2;
-        } else {
-          taken.push([action, undefined]);
-        }
-        break;
-      }
-
-      if (argumentCount === 1) {
-        taken.push([action, explicit]);
-        break;
-      }
-      if (option[1] === "-" || explicit === "" || sep || explicit.startsWith("-")) ignored();
-
-      // A single-dash flag followed by more letters, such as -hh.
-      taken.push([action, undefined]);
-      option = `-${explicit[0]}`;
-      const next = OPTIONS.get(option);
-      if (!next) {
-        extras.push(`-${explicit}`);
-        break;
-      }
-      action = next;
-      explicit = explicit.slice(1);
-      if (!explicit) {
-        sep = explicit = undefined;
-      } else if (explicit.startsWith("=")) {
-        sep = "=";
-        explicit = explicit.slice(1);
-      } else {
-        sep = "";
-      }
-    }
-
-    for (const [name, value] of taken) apply(name, value);
-
-    return stop;
-  };
-
-  const optionIndices = [...optionals.keys()];
-  const lastOption = optionIndices.length > 0 ? Math.max(...optionIndices) : -1;
-  let start = 0;
-  while (start <= lastOption) {
-    let next = start;
-    while (next <= lastOption && !optionals.has(next)) next += 1;
-
-    if (start !== next) {
-      const end = consumePositionals(start);
-      if (end > start) {
-        start = end;
-        continue;
-      }
-    }
-    if (!optionals.has(start)) {
-      extras.push(...argv.slice(start, next));
-      start = next;
-    }
-    start = consumeOptional(start);
-  }
-  extras.push(...argv.slice(consumePositionals(start)));
-
-  if (values.slug === undefined) usageError("the following arguments are required: slug");
-  if (extras.length > 0) usageError(`unrecognized arguments: ${extras.join(" ")}`);
-
-  return { ...values, slug: values.slug! };
+function expandHome(path: string): string {
+  return path === "~" || path.startsWith("~/") ? homedir() + path.slice(1) : path;
 }
 
 // Ctrl+C
+//
+// The SIGINT handler stops gphoto2 with SIGTERM, then SIGKILL after 5 s, and
+// exits 130. settle() parks the main flow meanwhile, so the child's exit
+// cannot be reported as a download failure.
 
-// Python raised KeyboardInterrupt wherever the program was. Here the handler
-// stops the running gphoto2 child, prints the message and exits 130, and
-// settle() parks the main flow so it cannot report the child's exit as a
-// download failure in the meantime.
-type Child = { process: Subprocess; stop: "terminate" | "kill" };
-
-let activeChild: Child | undefined;
+let activeChild: Subprocess | undefined;
 let interrupted = false;
 
 function running(child: Subprocess): boolean {
   return child.exitCode === null && child.signalCode === null;
 }
 
-async function waitFor(child: Subprocess, milliseconds: number): Promise<boolean> {
+async function exitsWithin(child: Subprocess, milliseconds: number): Promise<boolean> {
   return Promise.race([child.exited.then(() => true), Bun.sleep(milliseconds).then(() => false)]);
-}
-
-async function stopChild(child: Child): Promise<void> {
-  if (!running(child.process)) return;
-
-  // subprocess.run lets the child react to the terminal's SIGINT for 0.25 s,
-  // then kills it; the download loop sends SIGTERM and waits 5 s before SIGKILL.
-  if (child.stop === "kill") {
-    if (!(await waitFor(child.process, 250))) child.process.kill("SIGKILL");
-  } else {
-    child.process.kill("SIGTERM");
-    if (!(await waitFor(child.process, 5000))) child.process.kill("SIGKILL");
-  }
-
-  await child.process.exited;
 }
 
 async function interrupt(): Promise<void> {
   if (interrupted) return;
   interrupted = true;
 
-  if (activeChild) await stopChild(activeChild);
-  write(2, INTERRUPTED);
+  const child = activeChild;
+  if (child && running(child)) {
+    child.kill("SIGTERM");
+    if (!(await exitsWithin(child, 5000))) child.kill("SIGKILL");
+    await child.exited;
+  }
+
+  write(2, "\nfuji-ingest: interrupted; camera files were not deleted\n");
   process.exit(130);
 }
 
@@ -909,42 +193,31 @@ async function settle<T>(promise: Promise<T>): Promise<T> {
   return value;
 }
 
-// Camera
-
 function commandEnvironment(): Record<string, string | undefined> {
   return { ...process.env, LC_ALL: "C" };
 }
 
 async function runCapture(args: string[]): Promise<string> {
-  const child = Bun.spawn(args, {
-    env: commandEnvironment(),
-    stdin: "inherit",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  activeChild = { process: child, stop: "kill" };
+  const child = Bun.spawn(args, { env: commandEnvironment(), stdin: "inherit", stdout: "pipe", stderr: "pipe" });
+  activeChild = child;
 
   const [stdout, stderr, exitCode] = await settle(
-    Promise.all([
-      new Response(child.stdout).bytes(),
-      new Response(child.stderr).bytes(),
-      child.exited,
-    ]),
+    Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]),
   );
   activeChild = undefined;
 
-  const output = decodeOutput(stdout);
   if (exitCode !== 0) {
-    const details = decodeOutput(stderr).trim() || output.trim() || "unknown error";
+    const details = stderr.trim() || stdout.trim() || "unknown error";
     fail(`${args.join(" ")} failed:\n${details}`);
   }
 
-  return output;
+  return stdout;
 }
 
 async function detectCamera(): Promise<string> {
   const output = await runCapture(["gphoto2", "--auto-detect"]);
-  const devices = splitLines(output)
+  const devices = output
+    .split("\n")
     .filter(line => line.includes("usb:"))
     .map(line => line.trim());
 
@@ -959,7 +232,7 @@ async function cameraInventory(): Promise<InventoryItem[]> {
   let folder = "/";
   const files: InventoryItem[] = [];
 
-  for (const line of splitLines(output)) {
+  for (const line of output.split("\n")) {
     const folderMatch = FOLDER_RE.exec(line);
     if (folderMatch) {
       folder = folderMatch[1]!;
@@ -971,77 +244,40 @@ async function cameraInventory(): Promise<InventoryItem[]> {
 
   if (files.length === 0) fail("the camera contains no downloadable files");
 
-  const folders = new Map<string, string[]>();
-  for (const item of files) folders.set(item.name, [...(folders.get(item.name) ?? []), item.folder]);
-  const duplicates = [...folders].filter(([, found]) => found.length > 1).map(([name]) => name);
+  // Files land flat in the batch, so one name in two folders would overwrite.
+  const counts = new Map<string, number>();
+  for (const { name } of files) counts.set(name, (counts.get(name) ?? 0) + 1);
+  const duplicates = [...counts].filter(([, count]) => count > 1).map(([name]) => name);
   if (duplicates.length > 0) {
-    const sample = duplicates.sort(compareText).slice(0, 5).join(", ");
+    const sample = duplicates.sort().slice(0, 5).join(", ");
     fail(`the camera contains duplicate filenames in different folders (${sample}). A flat ingest would overwrite files.`);
   }
 
-  return files.sort((a, b) => compareText(a.folder, b.folder) || compareText(a.name, b.name));
+  return files.sort((a, b) => compare(a.folder, b.folder) || compare(a.name, b.name));
 }
 
-// Batch files
-
-function nearestExistingParent(path: string): string {
-  let candidate = resolvePath(expandUser(path));
-
-  while (!exists(candidate)) {
-    const parent = candidate.slice(0, candidate.lastIndexOf("/")) || "/";
-    if (parent === candidate) fail(`could not find an existing parent for ${path}`);
-    candidate = parent;
-  }
-
-  return candidate;
-}
-
-// shutil.disk_usage(path).free
-function freeSpace(path: string): number {
-  const stats = statfsSync(path);
+function freeSpace(root: string): number {
+  let directory = root;
+  while (!exists(directory) && directory !== dirname(directory)) directory = dirname(directory);
+  const stats = fs.statfsSync(directory);
 
   return stats.bavail * stats.bsize;
 }
 
-// tempfile.NamedTemporaryFile(dir=..., delete=False) creates a private file
-// named tmpXXXXXXXX; os.replace() then moves it over the manifest.
-function writeJsonAtomic(path: string, value: Manifest): void {
-  const directory = path.slice(0, path.lastIndexOf("/")) || "/";
-  mkdirSync(directory, { recursive: true });
+// Sorted keys, as the Python version wrote them. The temporary file is
+// private and renamed over the manifest, so a crash never leaves half a file.
+function writeManifest(path: string, manifest: Manifest): void {
+  const sorted = Object.fromEntries(Object.entries(manifest).sort(([a], [b]) => compare(a, b)));
+  const temporary = `${path}.tmp`;
 
-  const characters = "abcdefghijklmnopqrstuvwxyz0123456789_";
-  let temporary = "";
-  let fd = -1;
-  for (let attempt = 0; fd === -1; attempt += 1) {
-    const name = Array.from({ length: 8 }, () => characters[randomInt(characters.length)]).join("");
-    temporary = joinPath(directory, `tmp${name}`);
-    try {
-      fd = openSync(temporary, "wx", 0o600);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt > 100) throw error;
-    }
-  }
-
-  try {
-    write(fd, `${dumpJson(value)}\n`);
-  } finally {
-    closeSync(fd);
-  }
-  renameSync(temporary, path);
+  fs.writeFileSync(temporary, `${JSON.stringify(sorted, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(temporary, path);
 }
 
 function loadManifest(path: string): Manifest {
-  let text: string;
+  let value: unknown;
   try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(path));
-  } catch (error) {
-    if (error instanceof TypeError) fail(`could not read the incomplete ingest manifest ${path}: ${error.message}`);
-    fail(`could not read the incomplete ingest manifest ${path}: ${osErrorMessage(error, path)}`);
-  }
-
-  let value: Json;
-  try {
-    value = JSON.parse(text.replace(/\r\n?/g, "\n"));
+    value = JSON.parse(fs.readFileSync(path, "utf8"));
   } catch (error) {
     fail(`could not read the incomplete ingest manifest ${path}: ${(error as Error).message}`);
   }
@@ -1049,63 +285,58 @@ function loadManifest(path: string): Manifest {
     fail(`could not read the incomplete ingest manifest ${path}: expected a JSON object`);
   }
 
-  return value;
+  return value as Manifest;
 }
 
+// A file that vanished since the listing counts as a mismatch.
 function sizeMatches(path: string, expectedKib: number): boolean {
-  const actualKib = statSync(path).size / 1024;
+  const size = statPath(path)?.size;
 
-  return Math.abs(actualKib - expectedKib) <= 1.5;
+  return size !== undefined && Math.abs(size / 1024 - expectedKib) <= SIZE_TOLERANCE_KIB;
 }
 
-// sorted(path for path in batch.rglob("*") if path.is_file() and ...):
-// rglob does not descend into symlinked directories, is_file() follows links.
+// Every regular file under the batch except the control files. Symlinked
+// directories are not followed. Entries that vanish while gphoto2 writes
+// are skipped.
 function localFiles(batch: string): string[] {
   const files: string[] = [];
   const visit = (directory: string): void => {
-    let names: string[];
+    let names: string[] = [];
     try {
-      names = readdirSync(directory);
+      names = fs.readdirSync(directory);
     } catch {
       return;
     }
 
     for (const name of names) {
-      const path = joinPath(directory, name);
-      let link;
-      try {
-        link = lstatSync(path);
-      } catch {
-        continue;
-      }
-      if (link.isDirectory()) visit(path);
+      const path = join(directory, name);
+      if (statPath(path, false)?.isDirectory()) visit(path);
       else if (isFile(path) && !CONTROL_NAMES.has(name)) files.push(path);
     }
   };
 
   visit(batch);
 
-  return files.sort(comparePaths);
-}
-
-function fileName(path: string): string {
-  return path.slice(path.lastIndexOf("/") + 1);
+  return files.sort();
 }
 
 function prepareResume(batch: string, inventory: InventoryItem[]): Manifest {
-  const manifestPath = joinPath(batch, MANIFEST_NAME);
+  const manifestPath = join(batch, MANIFEST_NAME);
   if (!isFile(manifestPath)) fail(`cannot resume: ${manifestPath} does not exist`);
 
   const manifest = loadManifest(manifestPath);
-  if (manifest.status !== "incomplete") fail(`cannot resume an ingest with status ${repr(manifest.status)}`);
-  if (!jsonEqual(manifest.inventory, inventory)) {
+  if (manifest.status !== "incomplete") {
+    fail(`cannot resume an ingest with status ${JSON.stringify(manifest.status ?? null)}`);
+  }
+  // Both versions store inventory items with the keys folder, name, size_kib.
+  if (JSON.stringify(manifest.inventory) !== JSON.stringify(inventory)) {
     fail("the camera contents changed since the interrupted ingest; refusing to resume");
   }
 
   const expected = new Map(inventory.map(item => [item.name, item]));
   const seen = new Set<string>();
   for (const path of localFiles(batch)) {
-    const name = fileName(path);
+    const name = basename(path);
     if (seen.has(name)) fail(`duplicate local filename while resuming: ${name}`);
     seen.add(name);
 
@@ -1113,199 +344,138 @@ function prepareResume(batch: string, inventory: InventoryItem[]): Manifest {
     if (!item) fail(`unexpected file in incomplete ingest: ${path}`);
     if (!sizeMatches(path, item.size_kib)) {
       print(`Removing incomplete file before resume: ${name}`);
-      unlinkSync(path);
+      fs.unlinkSync(path);
     }
   }
 
   return manifest;
 }
 
-function completedDownloadCount(batch: string, inventory: InventoryItem[]): number {
-  const expected = new Map(inventory.map(item => [item.name, item]));
-
+function completedDownloadCount(batch: string, expected: Map<string, InventoryItem>): number {
   return localFiles(batch).filter(path => {
-    const item = expected.get(fileName(path));
+    const item = expected.get(basename(path));
 
     return item !== undefined && sizeMatches(path, item.size_kib);
   }).length;
 }
 
-function renderDownloadProgress(completed: number, total: number, previousWidth: number): number {
-  const percent = roundHalfEven((completed / total) * 100);
-  const message = `Downloading: ${completed}/${total} files (${percent}%)`;
+function renderProgress(completed: number, total: number, previousWidth: number): number {
+  const message = `Downloading: ${completed}/${total} files (${Math.round((completed / total) * 100)}%)`;
   write(1, `\r${message}${" ".repeat(Math.max(0, previousWidth - message.length))}`);
 
   return message.length;
 }
 
-// An unlinked temporary file, like tempfile.TemporaryFile, receives both
-// gphoto2 streams in order without the risk of a full pipe blocking it.
-function outputFile(): number {
-  const directory = mkdtempSync(join(tmpdir(), "fuji-ingest-"));
-  const path = join(directory, "gphoto2.log");
-  const fd = openSync(path, "w+", 0o600);
-  unlinkSync(path);
-  rmdirSync(directory);
-
-  return fd;
-}
-
-function readOutput(fd: number): string {
-  const buffer = Buffer.alloc(fstatSync(fd).size);
-  let offset = 0;
-  while (offset < buffer.length) {
-    const read = readSync(fd, buffer, offset, buffer.length - offset, offset);
-    if (read === 0) break;
-    offset += read;
-  }
-
-  return decodeOutput(buffer.subarray(0, offset));
-}
-
-async function downloadCameraFiles(
-  command: string[],
-  batch: string,
-  inventory: InventoryItem[],
-): Promise<{ success: boolean; output: string }> {
-  const total = inventory.length;
+// gphoto2 writes both streams to a temporary file, in order and without the
+// risk of blocking on a full pipe.
+async function download(command: string[], batch: string, inventory: InventoryItem[]): Promise<{ ok: boolean; output: string }> {
+  const expected = new Map(inventory.map(item => [item.name, item]));
+  const logDirectory = fs.mkdtempSync(join(tmpdir(), "fuji-ingest-"));
+  const log = join(logDirectory, "gphoto2.log");
+  const fd = fs.openSync(log, "w", 0o600);
   let previousWidth = 0;
   let lastCompleted = -1;
-  const fd = outputFile();
 
   try {
-    const child = Bun.spawn(command, {
-      cwd: batch,
-      env: commandEnvironment(),
-      stdin: "inherit",
-      stdout: fd,
-      stderr: fd,
-    });
-    activeChild = { process: child, stop: "terminate" };
+    const child = Bun.spawn(command, { cwd: batch, env: commandEnvironment(), stdin: "inherit", stdout: fd, stderr: fd });
+    activeChild = child;
 
-    while (running(child)) {
-      const completed = completedDownloadCount(batch, inventory);
-      if (completed !== lastCompleted) {
-        previousWidth = renderDownloadProgress(completed, total, previousWidth);
-        lastCompleted = completed;
-      }
-      await settle(Promise.race([child.exited, Bun.sleep(POLL_MS)]));
+    // One last count after gphoto2 exits, so the line ends on the final state.
+    for (let exited = false; !exited; ) {
+      exited = !running(child);
+      const completed = completedDownloadCount(batch, expected);
+      if (completed !== lastCompleted) previousWidth = renderProgress(completed, inventory.length, previousWidth);
+      lastCompleted = completed;
+      if (!exited) await settle(Promise.race([child.exited, Bun.sleep(POLL_MS)]));
     }
     await settle(child.exited);
     activeChild = undefined;
-
-    const completed = completedDownloadCount(batch, inventory);
-    if (completed !== lastCompleted) renderDownloadProgress(completed, total, previousWidth);
     write(1, "\n");
 
-    return { success: child.exitCode === 0, output: readOutput(fd).trim() };
+    return { ok: child.exitCode === 0, output: fs.readFileSync(log, "utf8").trim() };
   } finally {
-    closeSync(fd);
+    fs.closeSync(fd);
+    fs.rmSync(logDirectory, { recursive: true });
   }
 }
 
 function verify(batch: string, inventory: InventoryItem[]): string[] {
   const expected = new Map(inventory.map(item => [item.name, item]));
   const actual = new Map<string, string>();
-
   for (const path of localFiles(batch)) {
-    const name = fileName(path);
+    const name = basename(path);
     if (actual.has(name)) fail(`download produced duplicate filename: ${name}`);
     actual.set(name, path);
   }
 
-  const missing = [...expected.keys()].filter(name => !actual.has(name)).sort(compareText);
-  const extra = [...actual.keys()].filter(name => !expected.has(name)).sort(compareText);
-  const wrongSize = [...expected.keys()]
-    .filter(name => actual.has(name) && !sizeMatches(actual.get(name)!, expected.get(name)!.size_kib))
-    .sort(compareText);
-
-  const problems: string[] = [];
-  if (missing.length > 0) problems.push(`missing: ${missing.slice(0, 10).join(", ")}`);
-  if (extra.length > 0) problems.push(`unexpected: ${extra.slice(0, 10).join(", ")}`);
-  if (wrongSize.length > 0) problems.push(`wrong size: ${wrongSize.slice(0, 10).join(", ")}`);
+  const missing = [...expected.keys()].filter(name => !actual.has(name));
+  const unexpected = [...actual.keys()].filter(name => !expected.has(name));
+  const wrongSize = [...actual]
+    .filter(([name, path]) => expected.has(name) && !sizeMatches(path, expected.get(name)!.size_kib))
+    .map(([name]) => name);
+  const problems = Object.entries({ missing, unexpected, "wrong size": wrongSize })
+    .filter(([, names]) => names.length > 0)
+    .map(([label, names]) => `${label}: ${names.sort().slice(0, 10).join(", ")}`);
   if (problems.length > 0) fail(`download verification failed:\n${problems.join("\n")}`);
 
-  return [...actual.keys()].sort(compareText).map(name => actual.get(name)!);
+  return [...actual.keys()].sort().map(name => actual.get(name)!);
 }
 
+// Bun.file().stream() reads the file in chunks, never whole.
 async function sha256(path: string): Promise<string> {
   const digest = createHash("sha256");
-  const handle = await settle(open(path, "r"));
-  const buffer = Buffer.alloc(CHUNK_SIZE);
-
-  try {
-    while (true) {
-      const { bytesRead } = await settle(handle.read(buffer, 0, CHUNK_SIZE, null));
-      if (bytesRead === 0) break;
-      digest.update(buffer.subarray(0, bytesRead));
-    }
-  } finally {
-    await handle.close();
-  }
+  for await (const chunk of Bun.file(path).stream()) digest.update(chunk);
 
   return digest.digest("hex");
 }
 
 async function writeChecksums(batch: string, files: string[]): Promise<void> {
-  const checksumPath = joinPath(batch, CHECKSUM_NAME);
+  const checksumPath = join(batch, CHECKSUM_NAME);
   const temporary = `${checksumPath}.tmp`;
-  const fd = openSync(temporary, "w");
+  const fd = fs.openSync(temporary, "w");
 
   try {
     for (const [index, path] of files.entries()) {
-      const relative = path.slice(batch.length + 1);
-      write(fd, `${await sha256(path)}  ${relative}\n`);
-      if ((index + 1) % 100 === 0 || index + 1 === files.length) print(`Checksummed ${index + 1}/${files.length} files`);
+      write(fd, `${await sha256(path)}  ${relative(batch, path)}\n`);
+      const done = index + 1;
+      if (done % 100 === 0 || done === files.length) print(`Checksummed ${done}/${files.length} files`);
     }
   } finally {
-    closeSync(fd);
+    fs.closeSync(fd);
   }
-  renameSync(temporary, checksumPath);
-}
-
-function formatSize(size: number): string {
-  let value = size;
-  for (const unit of ["B", "KiB", "MiB", "GiB", "TiB"]) {
-    if (value < 1024 || unit === "TiB") return `${fixed1(value)} ${unit}`;
-    value /= 1024;
-  }
-
-  throw new Error("unreachable");
+  fs.renameSync(temporary, checksumPath);
 }
 
 async function main(args: Arguments): Promise<number> {
   if (!SLUG_RE.test(args.slug)) fail("slug must contain lowercase letters, numbers and single hyphens only");
-  const ingestDate = parseIsoDate(args.date);
-  if (!ingestDate) fail(`invalid date: ${args.date}; expected YYYY-MM-DD`);
-
+  const year = dateYear(args.date);
+  if (!year) fail(`invalid date: ${args.date}; expected YYYY-MM-DD`);
   if (!Bun.which("gphoto2")) fail("gphoto2 is not installed. On Arch, install the gphoto2 package.");
 
-  const root = resolvePath(expandUser(args.root));
-  const batchName = `${isoDate(ingestDate)}-${args.slug}`;
-  let batch = joinPath(root, String(ingestDate.year), batchName);
-  const legacyBatch = joinPath(root, "imported", String(ingestDate.year), batchName);
+  // Batches started under the old imported/ layout are resumed where they are.
+  const root = resolve(expandHome(args.root));
+  const batchName = `${args.date}-${args.slug}`;
+  const legacyBatch = join(root, "imported", year, batchName);
+  let batch = join(root, year, batchName);
   if (args.resume && !exists(batch) && isDirectory(legacyBatch)) batch = legacyBatch;
-  const manifestPath = joinPath(batch, MANIFEST_NAME);
+  const manifestPath = join(batch, MANIFEST_NAME);
 
   print(`Camera: ${await detectCamera()}`);
   print("Reading camera inventory…");
   const inventory = await cameraInventory();
   const totalBytes = inventory.reduce((sum, item) => sum + item.size_kib, 0) * 1024;
-  const suffixes = new Map<string, number>();
-  for (const item of inventory) {
-    const key = suffix(item.name).toUpperCase() || "(none)";
-    suffixes.set(key, (suffixes.get(key) ?? 0) + 1);
+  const types = new Map<string, number>();
+  for (const { name } of inventory) {
+    const type = extname(name).toUpperCase() || "(none)";
+    types.set(type, (types.get(type) ?? 0) + 1);
   }
-
-  const free = freeSpace(nearestExistingParent(root));
+  const free = freeSpace(root);
   const reserve = Math.max(1024 ** 3, Math.trunc(totalBytes * 0.05));
 
   print(`Imported destination: ${batch}`);
   print(`Camera files: ${inventory.length} (${formatSize(totalBytes)})`);
-  const types = [...suffixes].sort(([a], [b]) => compareText(a, b));
-  print(`Types: ${types.map(([key, count]) => `${key} ${count}`).join(", ")}`);
+  print(`Types: ${[...types].sort(([a], [b]) => compare(a, b)).map(([type, count]) => `${type} ${count}`).join(", ")}`);
   print(`Free space: ${formatSize(free)}`);
-
   if (free < totalBytes + reserve) {
     fail(`not enough free space; need ${formatSize(totalBytes + reserve)} including safety margin`);
   }
@@ -1322,27 +492,27 @@ async function main(args: Arguments): Promise<number> {
   } else {
     const existing = [batch, legacyBatch].find(exists);
     if (existing) fail(`destination already exists: ${existing}`);
-    mkdirSync(batch, { recursive: true });
+    fs.mkdirSync(batch, { recursive: true });
     manifest = {
       camera: await detectCamera(),
-      created_at: timestamp(),
+      created_at: new Date().toISOString(),
       destination: batch,
       inventory,
       status: "incomplete",
     };
-    writeJsonAtomic(manifestPath, manifest);
+    writeManifest(manifestPath, manifest);
   }
 
   print("Camera files will be copied without deleting them from the camera.");
   const command = ["gphoto2", "--quiet", "--recurse", "--get-all-files"];
   if (args.resume) command.push("--skip-existing");
-  const download = await downloadCameraFiles(command, batch, inventory);
-  if (!download.success) {
-    const details = splitLines(download.output).slice(-10).join("\n");
-    const output = details ? `\ngphoto2 output:\n${details}` : "";
+  const result = await download(command, batch, inventory);
+  if (!result.ok) {
+    const details = result.output.split("\n").slice(-10).join("\n");
     fail(
       "gphoto2 download failed. The partial batch was kept. " +
-        `Retry with: fuji-ingest --date ${args.date} --resume ${args.slug}${output}`,
+        `Retry with: fuji-ingest --date ${args.date} --resume ${args.slug}` +
+        (details ? `\ngphoto2 output:\n${details}` : ""),
     );
   }
 
@@ -1351,52 +521,37 @@ async function main(args: Arguments): Promise<number> {
   print("Writing SHA-256 manifest…");
   await writeChecksums(batch, files);
 
-  manifest.completed_at = timestamp();
-  manifest.status = "complete";
-  manifest.sha256_manifest = CHECKSUM_NAME;
-  writeJsonAtomic(manifestPath, manifest);
+  writeManifest(manifestPath, {
+    ...manifest,
+    completed_at: new Date().toISOString(),
+    sha256_manifest: CHECKSUM_NAME,
+    status: "complete",
+  });
 
   print();
   print(`Ingest complete: ${files.length} files in ${batch}`);
-  print(`Checksums: ${joinPath(batch, CHECKSUM_NAME)}`);
+  print(`Checksums: ${join(batch, CHECKSUM_NAME)}`);
   print(`Add this directory to the darktable library: ${batch}`);
   print("Keep the camera card unchanged until a second copy has been verified.");
 
   return 0;
 }
 
-// Bun drops a "--" placed right after the script path and resolves symlinks
-// in process.argv[1]. Python saw the command line as typed, so recover it from
-// /proc when it matches Bun's view.
-function commandLine(): { prog: string; argv: string[] } {
-  const argv = process.argv.slice(2);
-  let raw: string[] = [];
-  try {
-    raw = readFileSync("/proc/self/cmdline", "utf8").split("\0").slice(0, -1);
-  } catch {
-    // Keep Bun's view of the arguments.
-  }
-
-  for (const candidate of [["--", ...argv], argv]) {
-    const offset = raw.length - candidate.length;
-    if (offset >= 1 && candidate.every((argument, index) => raw[offset + index] === argument)) {
-      return { prog: basename(raw[offset - 1]!), argv: candidate };
-    }
-  }
-
-  return { prog: basename(process.argv[1] ?? "fuji-ingest"), argv };
-}
-
 async function entry(): Promise<number> {
-  const { prog, argv } = commandLine();
   process.on("SIGINT", () => void interrupt());
 
   try {
-    return await main(parseArguments(argv, prog));
+    const args = parseArguments(process.argv.slice(2));
+    if (args === "help") {
+      write(1, helpText());
+      return 0;
+    }
+
+    return await main(args);
   } catch (error) {
     if (interrupted) await new Promise(() => {});
     if (error instanceof UsageError) {
-      write(2, `${usageText(prog, helpWidth())}${prog}: error: ${error.message}\n`);
+      write(2, `${USAGE}\nfuji-ingest: error: ${error.message}\n`);
       return 2;
     }
     if (error instanceof IngestError) {
