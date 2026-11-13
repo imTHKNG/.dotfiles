@@ -33,7 +33,7 @@ Run every test with:
 mise run test
 ```
 
-The task runs `bun test tests`. The tests also need Python 3 and Fish, because they exercise the real helpers in temporary directories.
+The task runs `bun test tests`. The `web2app` tests also need Fish, because they run the real Fish functions in a temporary home.
 
 ## Managed files
 

@@ -43,15 +43,6 @@ export function requireCommand(name: string): string {
   return path;
 }
 
-// mise shims need the real HOME, so resolve the interpreter before isolating tests.
-export function pythonInterpreter(): string {
-  const result = Bun.spawnSync([requireCommand("python3"), "-c", "import sys; print(sys.executable)"]);
-  const path = result.stdout.toString().trim();
-  if (result.exitCode !== 0 || !path) throw new Error("could not resolve python3");
-
-  return path;
-}
-
 export function mode(path: string): number {
   return statSync(path).mode & 0o777;
 }
