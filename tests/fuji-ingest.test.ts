@@ -992,3 +992,53 @@ test("Ctrl+C kills gphoto2 when it ignores SIGTERM for 5 seconds", async () => {
   expect(Date.now() - started).toBeGreaterThanOrEqual(5000);
   expect(manifest().status).toBe("incomplete");
 }, 15_000);
+
+// Written by the Python version: json.dump(indent=2, sort_keys=True), local
+// time with microseconds and offset, interrupted after one and a half files.
+function pythonManifest(destination: string): string {
+  const item = (name: string) => `    {
+      "folder": "/store_10000001/DCIM/100_FUJI",
+      "name": "${name}",
+      "size_kib": 4
+    }`;
+
+  return `{
+  "camera": "Fujifilm X-T5                  usb:001,001",
+  "created_at": "2026-09-23T14:05:12.345678+02:00",
+  "destination": "${destination}",
+  "inventory": [
+${["DSCF0001.JPG", "DSCF0002.JPG", "DSCF0003.JPG"].map(item).join(",\n")}
+  ],
+  "status": "incomplete"
+}
+`;
+}
+
+test("resume accepts an incomplete batch started by the Python version", async () => {
+  camera(jpegs(3).map(file => ({ ...file, kib: 4 })));
+  mkdirSync(batch, { recursive: true });
+  writeFileSync(join(batch, ".fuji-ingest.json"), pythonManifest(batch));
+  writeFileSync(join(batch, "DSCF0001.JPG"), content("DSCF0001.JPG", 4096));
+  writeFileSync(join(batch, "DSCF0002.JPG"), content("DSCF0002.JPG", 2048));
+  const first = statSync(join(batch, "DSCF0001.JPG"));
+
+  const result = await ingest(["--resume"]);
+
+  expect(result.exitCode, result.stderr).toBe(0);
+  expect(result.stdout).toContain("Removing incomplete file before resume: DSCF0002.JPG\n");
+  expect(calls()).toEqual(resumeCalls);
+  const again = statSync(join(batch, "DSCF0001.JPG"));
+  expect([again.ino, again.mtimeMs]).toEqual([first.ino, first.mtimeMs]);
+  expect(readFileSync(join(batch, "SHA256SUMS"), "utf8")).toBe(
+    ["DSCF0001.JPG", "DSCF0002.JPG", "DSCF0003.JPG"]
+      .map(name => `${sha256(content(name, 4096))}  ${name}\n`)
+      .join(""),
+  );
+  const saved = manifest();
+  expect(saved.status).toBe("complete");
+  expect(saved.camera).toBe("Fujifilm X-T5                  usb:001,001");
+  expect(saved.created_at).toBe("2026-09-23T14:05:12.345678+02:00");
+  expect(saved.destination).toBe(batch);
+  expect(saved.sha256_manifest).toBe("SHA256SUMS");
+  expect(Object.keys(saved)).toEqual(Object.keys(saved).sort());
+});
