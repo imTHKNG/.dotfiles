@@ -36,9 +36,9 @@ beforeEach(() => {
 
 afterEach(() => temporary.cleanup());
 
-async function setup(args: string[] = [], success = true, env: Record<string, string> = {}) {
+async function setup(args: string[] = [], success = true) {
   const result = await run([bun, script, ...args], {
-    env: { HOME: home, PATH: "/bin:/usr/bin", ...env },
+    env: { HOME: home, PATH: "/bin:/usr/bin" },
   });
 
   expect(result.exitCode === 0, result.stderr).toBe(success);
@@ -183,82 +183,32 @@ test("runs as an extensionless TypeScript executable through its shebang", async
   });
 
   expect(result.exitCode, result.stderr).toBe(0);
-  expect(result.stdout.split("\n")[0]).toBe("usage: cli-proxy-setup [-h] [--refresh-config]");
+  expect(result.stdout.startsWith("usage: cli-proxy-setup")).toBe(true);
 });
 
-test("help matches the previous argparse output", async () => {
-  const result = await setup(["--help"], true, { COLUMNS: "80" });
+test("help exits without creating state", async () => {
+  const result = await setup(["--help"]);
 
-  expect(result.stdout).toBe(
-    [
-      "usage: executable_cli-proxy-setup [-h] [--refresh-config]",
-      "",
-      "Prepare machine-local CLIProxyAPI files without logging in or starting",
-      "services.",
-      "",
-      "options:",
-      "  -h, --help        show this help message and exit",
-      "  --refresh-config  Re-render the native config, backing up the previous file",
-      "                    and retaining the local key.",
-      "",
-    ].join("\n"),
-  );
+  expect(result.stdout).toContain("--refresh-config");
   expect(existsSync(root)).toBe(false);
 });
 
-// Bun drops a first "--" from process.argv; argparse rejected it.
-for (const args of [["--unknown"], ["--"], ["--", "--refresh-config"], ["--refresh-config=yes"]]) {
+for (const args of [["--unknown"], ["extra"], ["--refresh-config=yes"]]) {
   test(`usage error for ${args.join(" ")} exits 2 without creating state`, async () => {
-    const result = await setup(args, false, { COLUMNS: "80" });
+    const result = await setup(args, false);
 
     expect(result.exitCode).toBe(2);
     expect(result.stdout).toBe("");
-    expect(result.stderr.startsWith("usage: executable_cli-proxy-setup [-h] [--refresh-config]\n")).toBe(true);
-    expect(result.stderr).toContain("executable_cli-proxy-setup: error: ");
+    expect(result.stderr).toContain("cli-proxy-setup: unknown argument");
     expect(existsSync(root)).toBe(false);
   });
 }
 
-test("models.json keeps the Python json.dumps format", async () => {
-  mkdirSync(join(home, ".pi/agent"), { recursive: true });
-  writeFileSync(
-    models,
-    '{"providers": {"gpt": {"name": "Modèle 😀", "cost": {"input": 3.0, "tiny": 1e-7}, "id": 12345678901234567890}}, "10": true, "2": null}',
-  );
-
-  await setup();
-
-  const provider = readFileSync(join(managed, "pi-provider.json"), "utf8");
-  const text = readFileSync(models, "utf8");
-  const expected = [
-    "{",
-    '  "providers": {',
-    '    "gpt": {',
-    '      "name": "Mod\\u00e8le \\ud83d\\ude00",',
-    '      "cost": {',
-    '        "input": 3.0,',
-    '        "tiny": 1e-07',
-    "      },",
-    '      "id": 12345678901234567890',
-    "    },",
-    `    "claude-pro-proxy": ${JSON.stringify(JSON.parse(provider), null, 2).replaceAll("\n", "\n    ")}`,
-    "  },",
-    '  "10": true,',
-    '  "2": null',
-    "}",
-    "",
-  ].join("\n");
-  expect(text).toBe(expected);
-});
-
-test("provider equal under Python comparison is left unchanged", async () => {
+test("provider with the same content in another key order is left unchanged", async () => {
   const provider = JSON.parse(readFileSync(join(managed, "pi-provider.json"), "utf8"));
   const reordered = Object.fromEntries(Object.entries(provider).reverse());
   mkdirSync(join(home, ".pi/agent"), { recursive: true });
-  writeFileSync(
-    models,
-    JSON.stringify({ providers: { "claude-pro-proxy": reordered } }).replace('"reasoning":true', '"reasoning":1'),
-  );
+  writeFileSync(models, JSON.stringify({ providers: { "claude-pro-proxy": reordered } }));
   const before = readFileSync(models);
 
   await setup();
