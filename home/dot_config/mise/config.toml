@@ -17,7 +17,7 @@ rust = { version = "1.99.1", components = ["rust-analyzer"] }
 "npm:@steipete/summarize" = "0.25.3"
 "cargo:lstr" = "0.3.0"
 uv = "0.13.5"
-"pipx:yt-dlp" = "2026.10.21"
+yt-dlp = { version = "2026.10.26", rename_exe = "yt-dlp" }
 glow = "3.0.0"
 "npm:@openai/codex" = "0.164.0"
 claude = "2.1.318"
