@@ -1,0 +1,12 @@
+# Shared photography backup profile for Velvet and Raven.
+# The repository password is prompted for interactively.
+# The SFTP endpoint requires access to the LAN or a suitable VPN.
+[repository]
+repository = "opendal:sftp"
+
+[repository.options]
+connections = "4"
+endpoint = "ssh://knth@192.168.1.44"
+root = "/srv/staging-media/backups/rustic/photography"
+key = "{{ .chezmoi.homeDir }}/.ssh/id_ed25519"
+known_hosts_strategy = "strict"

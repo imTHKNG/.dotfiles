@@ -44,6 +44,7 @@ This repo currently manages, among others:
 - `~/.wezterm.lua`
 - `~/.xmonad/...`
 - `~/.config/fish/...`
+- `~/.config/rustic/photography.toml`
 - `~/.config/mise/config.toml`
 - `~/.config/nvim/...`
 - `~/.config/starship.toml`
@@ -121,6 +122,23 @@ The tests replace `gphoto2` with a shell script and leave `/usr/bin` off `PATH`,
 ```fish
 bun test tests/fuji-ingest.test.ts
 ```
+
+## Photography backups
+
+Chezmoi manages `~/.config/rustic/photography.toml` and the Fish alias `rphoto`, which runs `rustic -P photography`. Velvet and Raven back up their own photo imports to the same repository; Rustic records the source hostname in each snapshot. It does not synchronize their photo folders.
+
+The repository is on `knth@192.168.1.44` at `/srv/staging-media/backups/rustic/photography`. SFTP concurrency is limited to four operations to avoid SSH `MaxStartups` throttling. Away from home, access to this LAN address requires a suitable VPN or another configured route.
+
+Each machine needs its own authorized SSH key at `~/.ssh/id_ed25519` and a verified server entry in `~/.ssh/known_hosts`. Neither private keys nor the repository password belong in Git. Rustic prompts for the repository password, which must be available on both machines.
+
+After applying the dotfiles on Raven, open a new Fish shell and check access to the existing repository before backing up:
+
+```fish
+rphoto snapshots
+rphoto backup ~/pictures/photography
+```
+
+Do not run `init` again on Raven for this shared repository. Wait for `fuji-ingest` and other photo writes to finish before starting a backup. Keep the camera originals or another verified copy until the backup has completed and a restore has been tested.
 
 ## CLIProxyAPI and Claude Pro in Pi
 
