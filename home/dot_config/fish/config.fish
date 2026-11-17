@@ -35,6 +35,7 @@ alias sourceme="source $HOME/.config/fish/config.fish"
 alias reshell="exec fish"
 alias wm="workmux"
 alias hc="herdr-core"
+alias rphoto="rustic -P photography"
 
 abbr -a pn pnpm
 abbr -a remap setxkbmap -layout us,us -variant ,intl -option 'grp:alt_space_toggle'
